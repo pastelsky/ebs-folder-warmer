@@ -1,0 +1,44 @@
+# Database-like workload - Random reads with some writes
+# Simulates typical OLTP database access patterns
+
+[global]
+ioengine=libaio
+direct=1
+time_based=1
+runtime=60s
+group_reporting=1
+numjobs=4
+iodepth=16
+norandommap=1
+randrepeat=0
+
+[database_read_heavy]
+description=Heavy random read workload (MySQL/PostgreSQL OLTP)
+filename=${TEST_DIR}/db/test_db_${HOSTNAME}_${UNIQUE_ID}.dat
+size=1G
+bs=8k
+rw=randrw
+rwmixread=80
+rwmixwrite=20
+stonewall
+
+[database_index_scan]
+description=Index scan simulation (smaller random reads)
+filename=${TEST_DIR}/db/index_${HOSTNAME}_${UNIQUE_ID}.dat
+size=512M
+bs=4k
+rw=randread
+numjobs=2
+iodepth=32
+stonewall
+
+[database_log_write]
+description=Transaction log writes (sequential)
+filename=${TEST_DIR}/logs/txlog_${HOSTNAME}_${UNIQUE_ID}.log
+size=256M
+bs=64k
+rw=write
+fsync=1
+numjobs=1
+iodepth=1
+stonewall 

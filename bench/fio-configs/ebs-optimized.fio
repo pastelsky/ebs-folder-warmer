@@ -1,0 +1,66 @@
+# EBS-optimized workload patterns
+# Designed for AWS EBS volumes (gp3, io2, etc.)
+
+[global]
+ioengine=libaio
+direct=1
+time_based=1
+runtime=120s
+group_reporting=1
+randrepeat=0
+size=2G
+
+[ebs_gp3_baseline]
+description=EBS gp3 baseline performance test (3000 IOPS)
+filename=${TEST_DIR}/ebs/gp3_test_${HOSTNAME}_${UNIQUE_ID}.dat
+bs=16k
+rw=randrw
+rwmixread=75
+rwmixwrite=25
+numjobs=4
+iodepth=16
+rate_iops=750
+stonewall
+
+[ebs_io2_high_iops]
+description=EBS io2 high IOPS test
+filename=${TEST_DIR}/ebs/io2_test_${HOSTNAME}_${UNIQUE_ID}.dat
+bs=4k
+rw=randread
+numjobs=8
+iodepth=32
+rate_iops=2000
+stonewall
+
+[ebs_throughput_test]
+description=EBS throughput optimization (large sequential)
+filename=${TEST_DIR}/ebs/throughput_${HOSTNAME}_${UNIQUE_ID}.dat
+bs=1M
+rw=read
+numjobs=4
+iodepth=4
+rate=250m
+stonewall
+
+[ebs_burst_simulation]
+description=EBS burst credit simulation
+filename=${TEST_DIR}/ebs/burst_${HOSTNAME}_${UNIQUE_ID}.dat
+bs=8k
+rw=randrw
+rwmixread=60
+rwmixwrite=40
+numjobs=6
+iodepth=8
+# Simulate burst pattern: high IOPS for 30s, then throttled
+ramp_time=10s
+stonewall
+
+[ebs_cold_start]
+description=Cold start performance (first access)
+filename=${TEST_DIR}/ebs/cold_${HOSTNAME}_${UNIQUE_ID}.dat
+bs=64k
+rw=randread
+numjobs=2
+iodepth=4
+# Lower queue depth to simulate cold storage access
+stonewall 
