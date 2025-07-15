@@ -66,7 +66,7 @@ setup_test_environment() {
     
     # Database-like files (random data)
     sudo mkdir -p "$TEST_DIR/db"
-    sudo fio --name=create_db --directory="$TEST_DIR/db" --rw=write --bs=4k --size=512M --numjobs=1 --ioengine=sync --direct=1 --quiet
+    sudo fio --name=create_db --directory="$TEST_DIR/db" --rw=write --bs=4k --size=512M --numjobs=1 --ioengine=sync --direct=1 >/dev/null 2>&1
     
     # Log files (sequential data)
     sudo mkdir -p "$TEST_DIR/logs"
@@ -81,7 +81,7 @@ setup_test_environment() {
     
     # Web content (mixed sizes)
     sudo mkdir -p "$TEST_DIR/web"
-    sudo fio --name=create_web --directory="$TEST_DIR/web" --rw=write --bs=64k --size=256M --numjobs=4 --ioengine=sync --quiet
+    sudo fio --name=create_web --directory="$TEST_DIR/web" --rw=write --bs=64k --size=256M --numjobs=4 --ioengine=sync >/dev/null 2>&1
     
     sudo chown -R $(whoami):$(whoami) "$TEST_DIR" 2>/dev/null || true
     
