@@ -10,6 +10,11 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
 jobs:
   build:
     name: Build for ${{ matrix.target }}
@@ -109,16 +114,15 @@ jobs:
       with:
         path: ./artifacts
 
+    - name: Get tag name
+      id: tag
+      run: echo "tag_name=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
     - name: Create Release
-      id: create_release
-      uses: actions/create-release@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        tag_name: ${{ github.ref }}
-        release_name: Release ${{ github.ref }}
-        body: |
-          ## EBS Folder Warmer ${{ github.ref }}
+      run: |
+        gh release create ${{ steps.tag.outputs.tag_name }} \
+          --title "Release ${{ steps.tag.outputs.tag_name }}" \
+          --notes "## EBS Folder Warmer ${{ steps.tag.outputs.tag_name }}
           
           High-performance disk warming utility for AWS EBS volumes and other block devices.
           
@@ -132,34 +136,25 @@ jobs:
           ### Installation
           
           1. Download the appropriate tarball for your architecture
-          2. Extract: `tar -xzf disk-warmer-linux-*.tar.gz`
-          3. Install: `sudo ./disk-warmer-*/install.sh`
+          2. Extract: \`tar -xzf disk-warmer-linux-*.tar.gz\`
+          3. Install: \`sudo ./disk-warmer-*/install.sh\`
           
           ### Usage
           
-          ```bash
+          \`\`\`bash
           # Warm directory only (default, fast)
           sudo disk-warmer /var/lib/mysql /dev/nvme1n1
           
           # Full disk warming (comprehensive)
           sudo disk-warmer --full-disk /var/lib/mysql /dev/nvme1n1
-          ```
+          \`\`\`
           
           See README.md in the package for detailed instructions.
           
           ### Changes
           
-          See commit history for detailed changes in this release.
-        draft: false
-        prerelease: false
-
-    - name: Upload Release Assets
-      run: |
-        for file in ./artifacts/*/disk-warmer-*.tar.gz; do
-          asset_name=$(basename "$file")
-          echo "Uploading $asset_name"
-          gh release upload ${{ github.ref_name }} "$file" --clobber
-        done
+          See commit history for detailed changes in this release." \
+          ./artifacts/*/disk-warmer-*.tar.gz
       env:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
