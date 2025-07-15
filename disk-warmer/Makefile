@@ -22,10 +22,7 @@ install: $(TARGET)
 clean:
 	rm -f $(TARGET) disk-warmer-*
 
-# Cross-compilation helpers
-arm64: 
-	$(MAKE) CC=aarch64-linux-gnu-gcc TARGET=disk-warmer-arm64
-
+# Build variants
 portable:
 	$(MAKE) CC=gcc CFLAGS="-O2 -Wall -std=c99" TARGET=disk-warmer-portable
 
@@ -35,7 +32,6 @@ help:
 	@echo "  all       - Build disk-warmer (default)"
 	@echo "  install   - Install to /usr/local/bin"
 	@echo "  clean     - Remove built files"
-	@echo "  arm64     - Cross-compile for ARM64"
 	@echo "  portable  - Build portable binary"
 	@echo "  help      - Show this help"
 	@echo ""

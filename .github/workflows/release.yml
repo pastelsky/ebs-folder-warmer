@@ -23,12 +23,6 @@ jobs:
             name: disk-warmer-linux-x86_64
             cc: gcc
             
-          # ARM64 builds  
-          - target: aarch64-unknown-linux-gnu
-            arch: aarch64
-            name: disk-warmer-linux-aarch64
-            cc: aarch64-linux-gnu-gcc
-            
           # x86_64 with older glibc (more portable)
           - target: x86_64-unknown-linux-gnu
             arch: x86_64
@@ -45,20 +39,6 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y build-essential libaio-dev
         
-        # Install cross-compilation tools for ARM64
-        if [ "${{ matrix.arch }}" = "aarch64" ]; then
-          sudo apt-get install -y gcc-aarch64-linux-gnu libc6-dev-arm64-cross
-          # Install ARM64 libaio
-          sudo mkdir -p /usr/aarch64-linux-gnu/lib
-          wget http://ports.ubuntu.com/pool/main/liba/libaio/libaio1_0.3.113-4_arm64.deb
-          wget http://ports.ubuntu.com/pool/main/liba/libaio/libaio-dev_0.3.113-4_arm64.deb
-          sudo dpkg-deb -x libaio1_0.3.113-4_arm64.deb /tmp/libaio1
-          sudo dpkg-deb -x libaio-dev_0.3.113-4_arm64.deb /tmp/libaio-dev
-          sudo cp -r /tmp/libaio1/lib/aarch64-linux-gnu/* /usr/aarch64-linux-gnu/lib/
-          sudo cp -r /tmp/libaio-dev/usr/include/aarch64-linux-gnu/* /usr/aarch64-linux-gnu/include/ || true
-          sudo cp -r /tmp/libaio-dev/usr/lib/aarch64-linux-gnu/* /usr/aarch64-linux-gnu/lib/ || true
-        fi
-        
         # No additional dependencies needed for portable builds
         if [ "${{ matrix.portable }}" = "true" ]; then
           echo "Building portable version with dynamic libaio linking"
@@ -68,17 +48,8 @@ jobs:
       run: |
         cd disk-warmer
         
-        if [ "${{ matrix.arch }}" = "aarch64" ]; then
-          # Cross-compile for ARM64
-          export CC=aarch64-linux-gnu-gcc
-          export PKG_CONFIG_PATH=/usr/aarch64-linux-gnu/lib/pkgconfig
-          export CFLAGS="-I/usr/aarch64-linux-gnu/include"
-          export LDFLAGS="-L/usr/aarch64-linux-gnu/lib"
-          make CC=aarch64-linux-gnu-gcc TARGET=aarch64-linux-gnu
-        else
-          # Standard x86_64 build (both regular and portable use same build)
-          make
-        fi
+        # Standard x86_64 build (both regular and portable use same build)
+        make
         
         # Verify the binary
         file disk-warmer
@@ -156,7 +127,6 @@ jobs:
           Choose the appropriate binary for your system:
           
           - **disk-warmer-linux-x86_64.tar.gz** - Standard x86_64 build (most common)
-          - **disk-warmer-linux-aarch64.tar.gz** - ARM64/AArch64 build (for ARM servers)
           - **disk-warmer-linux-x86_64-portable.tar.gz** - Portable x86_64 build (wide compatibility)
           
           ### Installation
@@ -233,7 +203,6 @@ jobs:
           ### Downloads
           
           - **disk-warmer-linux-x86_64.tar.gz** - Standard x86_64 build
-          - **disk-warmer-linux-aarch64.tar.gz** - ARM64/AArch64 build  
           - **disk-warmer-linux-x86_64-portable.tar.gz** - Portable x86_64 (wide compatibility)" \
           --prerelease \
           ./artifacts/*/disk-warmer-*.tar.gz
