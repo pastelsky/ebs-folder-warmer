@@ -83,34 +83,49 @@ setup_test_environment() {
     sudo mkdir -p "$TEST_DIR/web"
     sudo fio --name=create_web --directory="$TEST_DIR/web" --rw=write --bs=64k --size=256M --numjobs=4 --ioengine=sync >/dev/null 2>&1
     
-    # Node modules (many small files, deep directory structure)
-    log "Creating realistic node_modules structure..."
-    sudo mkdir -p "$TEST_DIR/node_modules"
+    # Node modules (many small files, deep directory structure) - Target: ~10GB
+    log "Creating large node_modules structure (~10GB)..."
+    sudo mkdir -p "$TEST_DIR/node_modules" || error "Failed to create node_modules directory"
     
-    # Create a realistic node_modules with many packages and deep nesting
-    for pkg in {1..200}; do
-        pkg_name="package-$pkg"
-        sudo mkdir -p "$TEST_DIR/node_modules/$pkg_name/src/components/utils"
-        sudo mkdir -p "$TEST_DIR/node_modules/$pkg_name/dist/esm/cjs"
-        sudo mkdir -p "$TEST_DIR/node_modules/$pkg_name/node_modules/dep-{1..3}/lib"
+    # Create using fio for better performance - simulate realistic node_modules
+    log "Creating large packages with fio..."
+    
+    # Create large framework packages (React, Angular, etc.)
+    for framework in react angular vue webpack typescript; do
+        sudo mkdir -p "$TEST_DIR/node_modules/@$framework/core/dist"
+        sudo fio --name=create_framework --directory="$TEST_DIR/node_modules/@$framework/core/dist" \
+            --rw=write --bs=64k --size=500M --numjobs=1 --ioengine=sync >/dev/null 2>&1 || {
+            warn "Failed to create framework package $framework, continuing..."
+            continue
+        }
+    done
+    
+    # Create many smaller packages efficiently
+    log "Creating smaller utility packages..."
+    for batch in {1..20}; do
+        batch_dir="$TEST_DIR/node_modules/batch-$batch"
+        sudo mkdir -p "$batch_dir"
+        sudo fio --name=create_batch --directory="$batch_dir" \
+            --rw=write --bs=4k --size=500M --numjobs=10 --ioengine=sync >/dev/null 2>&1 || {
+            warn "Failed to create batch $batch, continuing..."
+            continue
+        }
         
-        # Create typical files in each package
-        sudo dd if=/dev/urandom of="$TEST_DIR/node_modules/$pkg_name/package.json" bs=1k count=1 2>/dev/null
-        sudo dd if=/dev/urandom of="$TEST_DIR/node_modules/$pkg_name/README.md" bs=2k count=1 2>/dev/null
-        sudo dd if=/dev/urandom of="$TEST_DIR/node_modules/$pkg_name/index.js" bs=4k count=1 2>/dev/null
-        sudo dd if=/dev/urandom of="$TEST_DIR/node_modules/$pkg_name/src/index.js" bs=8k count=1 2>/dev/null
-        sudo dd if=/dev/urandom of="$TEST_DIR/node_modules/$pkg_name/dist/bundle.js" bs=64k count=1 2>/dev/null
+        if [ $((batch % 5)) -eq 0 ]; then
+            log "Created $batch/20 package batches..."
+        fi
+    done
+    
+    # Create many small files to simulate real node_modules structure
+    log "Creating realistic file structure..."
+    sudo mkdir -p "$TEST_DIR/node_modules/.cache/babel-loader"
+    for i in {1..1000}; do
+        sudo dd if=/dev/urandom of="$TEST_DIR/node_modules/.cache/babel-loader/cache-$i.json" \
+            bs=4k count=1 2>/dev/null || break
         
-        # Create many small files (common in node_modules)
-        for file in {1..20}; do
-            sudo dd if=/dev/urandom of="$TEST_DIR/node_modules/$pkg_name/src/components/comp-$file.js" bs=512 count=1 2>/dev/null
-        done
-        
-        # Create nested dependencies
-        for dep in {1..3}; do
-            sudo dd if=/dev/urandom of="$TEST_DIR/node_modules/$pkg_name/node_modules/dep-$dep/index.js" bs=2k count=1 2>/dev/null
-            sudo dd if=/dev/urandom of="$TEST_DIR/node_modules/$pkg_name/node_modules/dep-$dep/package.json" bs=512 count=1 2>/dev/null
-        done
+        if [ $((i % 200)) -eq 0 ]; then
+            log "Created $i/1000 cache files..."
+        fi
     done
     
     sudo chown -R $(whoami):$(whoami) "$TEST_DIR" 2>/dev/null || true
@@ -195,7 +210,7 @@ benchmark_warming_effectiveness() {
         --command-name "Log Files (384MB)" "sudo $DISK_WARMER $TEST_DIR/logs $DEVICE" \
         --command-name "Config Files (400KB)" "sudo $DISK_WARMER $TEST_DIR/config $DEVICE" \
         --command-name "Web Content (256MB)" "sudo $DISK_WARMER $TEST_DIR/web $DEVICE" \
-        --command-name "Node Modules (~500MB, 50k+ files)" "sudo $DISK_WARMER $TEST_DIR/node_modules $DEVICE" \
+        --command-name "Node Modules (~10GB, 200k+ files)" "sudo $DISK_WARMER $TEST_DIR/node_modules $DEVICE" \
         --command-name "Full Dataset" "sudo $DISK_WARMER $TEST_DIR $DEVICE"
 }
 
