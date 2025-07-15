@@ -1,3 +1,5 @@
+#define _GNU_SOURCE
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -17,8 +19,7 @@
 #include <syslog.h>
 #include <time.h>
 #include <sys/time.h>
-
-#define _GNU_SOURCE
+#include <signal.h>
 
 #define DISK_WARMER_VERSION "1.2.0"
 #define LOG_INTERVAL 5 // Seconds
