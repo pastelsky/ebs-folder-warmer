@@ -83,8 +83,8 @@ setup_test_environment() {
     sudo mkdir -p "$TEST_DIR/web"
     sudo fio --name=create_web --directory="$TEST_DIR/web" --rw=write --bs=64k --size=256M --numjobs=4 --ioengine=sync >/dev/null 2>&1
     
-    # Node modules (many small files, deep directory structure) - Target: ~10GB
-    log "Creating large node_modules structure (~10GB)..."
+    # Node modules (many small files, deep directory structure) - Target: ~4GB
+    log "Creating large node_modules structure (~4GB)..."
     sudo mkdir -p "$TEST_DIR/node_modules" || error "Failed to create node_modules directory"
     
     # Create using fio for better performance - simulate realistic node_modules
@@ -94,7 +94,7 @@ setup_test_environment() {
     for framework in react angular vue webpack typescript; do
         sudo mkdir -p "$TEST_DIR/node_modules/@$framework/core/dist"
         sudo fio --name=create_framework --directory="$TEST_DIR/node_modules/@$framework/core/dist" \
-            --rw=write --bs=64k --size=500M --numjobs=1 --ioengine=sync >/dev/null 2>&1 || {
+            --rw=write --bs=64k --size=400M --numjobs=1 --ioengine=sync >/dev/null 2>&1 || {
             warn "Failed to create framework package $framework, continuing..."
             continue
         }
@@ -102,18 +102,16 @@ setup_test_environment() {
     
     # Create many smaller packages efficiently
     log "Creating smaller utility packages..."
-    for batch in {1..20}; do
+    for batch in {1..5}; do
         batch_dir="$TEST_DIR/node_modules/batch-$batch"
         sudo mkdir -p "$batch_dir"
         sudo fio --name=create_batch --directory="$batch_dir" \
-            --rw=write --bs=4k --size=500M --numjobs=10 --ioengine=sync >/dev/null 2>&1 || {
+            --rw=write --bs=4k --size=400M --numjobs=10 --ioengine=sync >/dev/null 2>&1 || {
             warn "Failed to create batch $batch, continuing..."
             continue
         }
         
-        if [ $((batch % 5)) -eq 0 ]; then
-            log "Created $batch/20 package batches..."
-        fi
+        log "Created $batch/5 package batches..."
     done
     
     # Create many small files to simulate real node_modules structure
@@ -210,7 +208,7 @@ benchmark_warming_effectiveness() {
         --command-name "Log Files (384MB)" "sudo $DISK_WARMER $TEST_DIR/logs $DEVICE" \
         --command-name "Config Files (400KB)" "sudo $DISK_WARMER $TEST_DIR/config $DEVICE" \
         --command-name "Web Content (256MB)" "sudo $DISK_WARMER $TEST_DIR/web $DEVICE" \
-        --command-name "Node Modules (~10GB, 200k+ files)" "sudo $DISK_WARMER $TEST_DIR/node_modules $DEVICE" \
+        --command-name "Node Modules (~4GB, 50k+ files)" "sudo $DISK_WARMER $TEST_DIR/node_modules $DEVICE" \
         --command-name "Full Dataset" "sudo $DISK_WARMER $TEST_DIR $DEVICE"
 }
 
