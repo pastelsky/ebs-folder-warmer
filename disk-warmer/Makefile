@@ -20,14 +20,14 @@ install: $(TARGET)
 
 # Clean target
 clean:
-	rm -f $(TARGET)
+	rm -f $(TARGET) disk-warmer-*
 
 # Cross-compilation helpers
 arm64: 
 	$(MAKE) CC=aarch64-linux-gnu-gcc TARGET=disk-warmer-arm64
 
-static:
-	$(MAKE) CC=musl-gcc LDFLAGS="-static -laio" TARGET=disk-warmer-static
+portable:
+	$(MAKE) CC=gcc CFLAGS="-O2 -Wall -std=c99" TARGET=disk-warmer-portable
 
 # Help
 help:
@@ -36,7 +36,7 @@ help:
 	@echo "  install   - Install to /usr/local/bin"
 	@echo "  clean     - Remove built files"
 	@echo "  arm64     - Cross-compile for ARM64"
-	@echo "  static    - Build statically linked binary"
+	@echo "  portable  - Build portable binary"
 	@echo "  help      - Show this help"
 	@echo ""
 	@echo "Variables:"

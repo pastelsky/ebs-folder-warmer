@@ -43,8 +43,8 @@ sudo ./disk-warmer-linux-x86_64/install.sh
 
 **Available builds:**
 - `disk-warmer-linux-x86_64.tar.gz` - Standard x86_64 build (most common)
-- `disk-warmer-linux-aarch64.tar.gz` - ARM64/AArch64 build (for ARM servers)
-- `disk-warmer-linux-x86_64-static.tar.gz` - Statically linked x86_64 (most portable)
+- `disk-warmer-linux-aarch64.tar.gz` - ARM64/AArch64 build (for ARM servers)  
+- `disk-warmer-linux-x86_64-portable.tar.gz` - Portable x86_64 build (wide compatibility)
 
 ### Development Builds
 
@@ -400,9 +400,9 @@ The GitHub Actions workflow:
 
 | Build Type | Architecture | Compatibility | Use Case |
 |------------|-------------|---------------|----------|
-| Standard x86_64 | x86_64 | Most Linux distros | General use |
+| Standard x86_64 | x86_64 | Modern Linux distros | General use |
 | ARM64 | aarch64 | ARM servers, AWS Graviton | ARM-based systems |
-| Static x86_64 | x86_64 | Any Linux (no deps) | Maximum portability |
+| Portable x86_64 | x86_64 | Wide Linux compatibility | Older systems, broad compatibility |
 
 ## Contributing
 

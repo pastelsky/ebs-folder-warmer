@@ -29,6 +29,4 @@ package/
 Thumbs.db
 
 # Build dependencies (downloaded during CI)
-disk-warmer/libaio-*/
 disk-warmer/*.deb
-disk-warmer/*.xz

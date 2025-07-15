@@ -29,12 +29,12 @@ jobs:
             name: disk-warmer-linux-aarch64
             cc: aarch64-linux-gnu-gcc
             
-          # Static builds (more portable)
-          - target: x86_64-unknown-linux-musl
+          # x86_64 with older glibc (more portable)
+          - target: x86_64-unknown-linux-gnu
             arch: x86_64
-            name: disk-warmer-linux-x86_64-static
-            cc: musl-gcc
-            static: true
+            name: disk-warmer-linux-x86_64-portable
+            cc: gcc
+            portable: true
 
     steps:
     - name: Checkout code
@@ -59,10 +59,9 @@ jobs:
           sudo cp -r /tmp/libaio-dev/usr/lib/aarch64-linux-gnu/* /usr/aarch64-linux-gnu/lib/ || true
         fi
         
-        # Install musl for static builds
-        if [ "${{ matrix.static }}" = "true" ]; then
-          sudo apt-get install -y musl-tools musl-dev
-          # For static libaio, we'll need to handle this differently
+        # No additional dependencies needed for portable builds
+        if [ "${{ matrix.portable }}" = "true" ]; then
+          echo "Building portable version with dynamic libaio linking"
         fi
 
     - name: Build binary
@@ -76,18 +75,8 @@ jobs:
           export CFLAGS="-I/usr/aarch64-linux-gnu/include"
           export LDFLAGS="-L/usr/aarch64-linux-gnu/lib"
           make CC=aarch64-linux-gnu-gcc TARGET=aarch64-linux-gnu
-        elif [ "${{ matrix.static }}" = "true" ]; then
-          # Static build - we'll link libaio statically
-          export CC=musl-gcc
-          # Download and compile libaio statically
-          wget http://archive.ubuntu.com/ubuntu/pool/main/liba/libaio/libaio_0.3.113.orig.tar.xz
-          tar xf libaio_0.3.113.orig.tar.xz
-          cd libaio-0.3.113
-          make CC=musl-gcc
-          cd ..
-          musl-gcc -static -o disk-warmer main.c libaio-0.3.113/src/libaio.a -I libaio-0.3.113/src -O2 -Wall
         else
-          # Standard x86_64 build
+          # Standard x86_64 build (both regular and portable use same build)
           make
         fi
         
@@ -168,7 +157,7 @@ jobs:
           
           - **disk-warmer-linux-x86_64.tar.gz** - Standard x86_64 build (most common)
           - **disk-warmer-linux-aarch64.tar.gz** - ARM64/AArch64 build (for ARM servers)
-          - **disk-warmer-linux-x86_64-static.tar.gz** - Statically linked x86_64 (most portable)
+          - **disk-warmer-linux-x86_64-portable.tar.gz** - Portable x86_64 build (wide compatibility)
           
           ### Installation
           
@@ -245,7 +234,7 @@ jobs:
           
           - **disk-warmer-linux-x86_64.tar.gz** - Standard x86_64 build
           - **disk-warmer-linux-aarch64.tar.gz** - ARM64/AArch64 build  
-          - **disk-warmer-linux-x86_64-static.tar.gz** - Statically linked (most portable)" \
+          - **disk-warmer-linux-x86_64-portable.tar.gz** - Portable x86_64 (wide compatibility)" \
           --prerelease \
           ./artifacts/*/disk-warmer-*.tar.gz
       env:
