@@ -152,7 +152,7 @@ sudo ./disk-warmer --silent --syslog /home/ubuntu/important-data /dev/nvme2n1
 ### Sample Output
 
 **Directory-only mode (default):**
-```
+```console
 === Phase 1: Discovering and warming directory files ===
 Found 1,247 extents in directory to warm.
 Directory extents sorted for sequential reading.
@@ -164,7 +164,7 @@ Total warming time completed in 12.34 seconds
 ```
 
 **Full disk mode (with --full-disk flag):**
-```
+```console
 === Phase 1: Discovering and warming directory files ===
 Found 1,247 extents in directory to warm.
 Directory extents sorted for sequential reading.
