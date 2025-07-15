@@ -153,21 +153,55 @@ detect_device() {
 }
 
 benchmark_directory_warming() {
-    log "Benchmarking directory warming performance..."
+    log "Benchmarking directory warming vs fio read performance..."
     
-    # Test different directory warming scenarios
+    # Create simple fio job for directory reading
+    cat > "$RESULTS_DIR/read_directory.fio" << 'EOF'
+[read_directory]
+rw=read
+bs=64k
+ioengine=libaio
+iodepth=16
+direct=1
+numjobs=4
+group_reporting
+time_based
+runtime=5s
+EOF
+
+    # Test different directory types: fio baseline vs disk warmer
+    log "Testing small config files (400KB)..."
     hyperfine \
         --warmup 1 \
         --min-runs 3 \
         --max-runs 5 \
         --prepare 'sync; sudo sh -c "echo 3 > /proc/sys/vm/drop_caches" 2>/dev/null || true' \
-        --export-json "$RESULTS_DIR/directory_warming.json" \
-        --export-markdown "$RESULTS_DIR/directory_warming.md" \
-        "sudo $DISK_WARMER $TEST_DIR/db $DEVICE" \
-        "sudo $DISK_WARMER $TEST_DIR/logs $DEVICE" \
-        "sudo $DISK_WARMER $TEST_DIR/config $DEVICE" \
-        "sudo $DISK_WARMER $TEST_DIR/web $DEVICE" \
-        "sudo $DISK_WARMER $TEST_DIR/node_modules $DEVICE"
+        --export-json "$RESULTS_DIR/config_fio_vs_warmer.json" \
+        --export-markdown "$RESULTS_DIR/config_fio_vs_warmer.md" \
+        --command-name "fio: Read config files" "fio $RESULTS_DIR/read_directory.fio --directory=$TEST_DIR/config --output-format=terse" \
+        --command-name "disk-warmer: Warm config files" "sudo $DISK_WARMER $TEST_DIR/config $DEVICE"
+
+    log "Testing large sequential files (logs, 384MB)..."
+    hyperfine \
+        --warmup 1 \
+        --min-runs 3 \
+        --max-runs 5 \
+        --prepare 'sync; sudo sh -c "echo 3 > /proc/sys/vm/drop_caches" 2>/dev/null || true' \
+        --export-json "$RESULTS_DIR/logs_directory_fio_vs_warmer.json" \
+        --export-markdown "$RESULTS_DIR/logs_directory_fio_vs_warmer.md" \
+        --command-name "fio: Read log files" "fio $RESULTS_DIR/read_directory.fio --directory=$TEST_DIR/logs --output-format=terse" \
+        --command-name "disk-warmer: Warm log files" "sudo $DISK_WARMER $TEST_DIR/logs $DEVICE"
+
+    log "Testing node_modules structure (~4GB)..."
+    hyperfine \
+        --warmup 1 \
+        --min-runs 2 \
+        --max-runs 3 \
+        --prepare 'sync; sudo sh -c "echo 3 > /proc/sys/vm/drop_caches" 2>/dev/null || true' \
+        --export-json "$RESULTS_DIR/node_modules_directory_fio_vs_warmer.json" \
+        --export-markdown "$RESULTS_DIR/node_modules_directory_fio_vs_warmer.md" \
+        --command-name "fio: Read node_modules" "fio $RESULTS_DIR/read_directory.fio --directory=$TEST_DIR/node_modules --output-format=terse --runtime=10s" \
+        --command-name "disk-warmer: Warm node_modules" "sudo $DISK_WARMER $TEST_DIR/node_modules $DEVICE"
 }
 
 benchmark_full_disk_warming() {
@@ -195,22 +229,93 @@ benchmark_warming_effectiveness() {
         return
     fi
     
-    log "Benchmarking disk warming time for different workload types..."
+    log "Benchmarking fio vs disk warmer performance..."
     
-    # Test warming time for different directory types with realistic workloads
+    # Create fio job files for reading different workloads
+    cat > "$RESULTS_DIR/read_database.fio" << 'EOF'
+[read_database]
+directory=${TEST_DIR}/db
+rw=read
+bs=4k
+ioengine=libaio
+iodepth=32
+direct=1
+numjobs=4
+group_reporting
+EOF
+
+    cat > "$RESULTS_DIR/read_logs.fio" << 'EOF'
+[read_logs]
+directory=${TEST_DIR}/logs
+rw=read
+bs=1M
+ioengine=libaio
+iodepth=8
+direct=1
+numjobs=2
+group_reporting
+EOF
+
+    cat > "$RESULTS_DIR/read_node_modules.fio" << 'EOF'
+[read_node_modules]
+directory=${TEST_DIR}/node_modules
+rw=read
+bs=64k
+ioengine=libaio
+iodepth=16
+direct=1
+numjobs=8
+group_reporting
+time_based
+runtime=30s
+EOF
+
+    # Test 1: Database workload (many small random reads)
+    log "Testing database workload (512MB, small files)..."
     hyperfine \
         --warmup 1 \
         --min-runs 3 \
         --max-runs 5 \
         --prepare 'sync; sudo sh -c "echo 3 > /proc/sys/vm/drop_caches" 2>/dev/null || true' \
-        --export-json "$RESULTS_DIR/warming_time_by_workload.json" \
-        --export-markdown "$RESULTS_DIR/warming_time_by_workload.md" \
-        --command-name "Database Files (512MB)" "sudo $DISK_WARMER $TEST_DIR/db $DEVICE" \
-        --command-name "Log Files (384MB)" "sudo $DISK_WARMER $TEST_DIR/logs $DEVICE" \
-        --command-name "Config Files (400KB)" "sudo $DISK_WARMER $TEST_DIR/config $DEVICE" \
-        --command-name "Web Content (256MB)" "sudo $DISK_WARMER $TEST_DIR/web $DEVICE" \
-        --command-name "Node Modules (~4GB, 50k+ files)" "sudo $DISK_WARMER $TEST_DIR/node_modules $DEVICE" \
-        --command-name "Full Dataset" "sudo $DISK_WARMER $TEST_DIR $DEVICE"
+        --export-json "$RESULTS_DIR/database_fio_vs_warmer.json" \
+        --export-markdown "$RESULTS_DIR/database_fio_vs_warmer.md" \
+        --command-name "fio: Cold read (baseline)" "fio $RESULTS_DIR/read_database.fio --output-format=terse --runtime=10s --time_based" \
+        --command-name "disk-warmer: Warm files" "sudo $DISK_WARMER $TEST_DIR/db $DEVICE"
+
+    # Test 2: Large sequential files 
+    log "Testing log workload (384MB, large sequential files)..."
+    hyperfine \
+        --warmup 1 \
+        --min-runs 3 \
+        --max-runs 5 \
+        --prepare 'sync; sudo sh -c "echo 3 > /proc/sys/vm/drop_caches" 2>/dev/null || true' \
+        --export-json "$RESULTS_DIR/logs_fio_vs_warmer.json" \
+        --export-markdown "$RESULTS_DIR/logs_fio_vs_warmer.md" \
+        --command-name "fio: Cold read (baseline)" "fio $RESULTS_DIR/read_logs.fio --output-format=terse --runtime=10s --time_based" \
+        --command-name "disk-warmer: Warm files" "sudo $DISK_WARMER $TEST_DIR/logs $DEVICE"
+
+    # Test 3: Node modules (many small files, deep directory structure)
+    log "Testing node_modules workload (~4GB, 50k+ files)..."
+    hyperfine \
+        --warmup 1 \
+        --min-runs 2 \
+        --max-runs 3 \
+        --prepare 'sync; sudo sh -c "echo 3 > /proc/sys/vm/drop_caches" 2>/dev/null || true' \
+        --export-json "$RESULTS_DIR/node_modules_fio_vs_warmer.json" \
+        --export-markdown "$RESULTS_DIR/node_modules_fio_vs_warmer.md" \
+        --command-name "fio: Cold read (baseline)" "fio $RESULTS_DIR/read_node_modules.fio --output-format=terse" \
+        --command-name "disk-warmer: Warm files" "sudo $DISK_WARMER $TEST_DIR/node_modules $DEVICE"
+
+    # Test 4: Effectiveness test - compare read performance before/after warming
+    log "Testing warming effectiveness (before vs after warming)..."
+    hyperfine \
+        --warmup 1 \
+        --min-runs 3 \
+        --max-runs 5 \
+        --export-json "$RESULTS_DIR/warming_effectiveness.json" \
+        --export-markdown "$RESULTS_DIR/warming_effectiveness.md" \
+        --command-name "fio: Cold read" --prepare 'sync; sudo sh -c "echo 3 > /proc/sys/vm/drop_caches" 2>/dev/null || true' "fio $RESULTS_DIR/read_database.fio --output-format=terse --runtime=5s --time_based" \
+        --command-name "fio: After warming" --prepare 'sync; sudo sh -c "echo 3 > /proc/sys/vm/drop_caches" 2>/dev/null || true; sudo '"$DISK_WARMER"' '"$TEST_DIR/db"' '"$DEVICE"' >/dev/null 2>&1' "fio $RESULTS_DIR/read_database.fio --output-format=terse --runtime=5s --time_based"
 }
 
 benchmark_configuration_options() {
