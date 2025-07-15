@@ -111,18 +111,12 @@ detect_device() {
 benchmark_directory_warming() {
     log "Benchmarking directory warming performance..."
     
-    # Clear caches before each test
-    clear_caches() {
-        sync
-        sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches' 2>/dev/null || true
-    }
-    
     # Test different directory warming scenarios
     hyperfine \
         --warmup 1 \
         --min-runs 3 \
         --max-runs 5 \
-        --prepare 'clear_caches' \
+        --prepare 'sync; sudo sh -c "echo 3 > /proc/sys/vm/drop_caches" 2>/dev/null || true' \
         --export-json "$RESULTS_DIR/directory_warming.json" \
         --export-markdown "$RESULTS_DIR/directory_warming.md" \
         "sudo $DISK_WARMER $TEST_DIR/db $DEVICE" \
@@ -139,16 +133,11 @@ benchmark_full_disk_warming() {
     
     log "Benchmarking full disk warming vs directory-only..."
     
-    clear_caches() {
-        sync
-        sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches' 2>/dev/null || true
-    }
-    
     hyperfine \
         --warmup 1 \
         --min-runs 2 \
         --max-runs 3 \
-        --prepare 'clear_caches' \
+        --prepare 'sync; sudo sh -c "echo 3 > /proc/sys/vm/drop_caches" 2>/dev/null || true' \
         --export-json "$RESULTS_DIR/full_vs_directory.json" \
         --export-markdown "$RESULTS_DIR/full_vs_directory.md" \
         --command-name "Directory Only" "sudo $DISK_WARMER $TEST_DIR $DEVICE" \
@@ -189,24 +178,13 @@ runtime=30s
 group_reporting
 EOF
 
-    clear_caches() {
-        sync
-        sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches' 2>/dev/null || true
-    }
-    
-    warm_directory() {
-        if detect_device; then
-            sudo "$DISK_WARMER" "$TEST_DIR" "$DEVICE" >/dev/null 2>&1
-        fi
-    }
-    
     # Test random read performance
     log "Testing random read performance..."
     hyperfine \
         --warmup 1 \
         --min-runs 3 \
         --max-runs 5 \
-        --prepare 'clear_caches' \
+        --prepare 'sync; sudo sh -c "echo 3 > /proc/sys/vm/drop_caches" 2>/dev/null || true' \
         --export-json "$RESULTS_DIR/random_read_cold.json" \
         --export-markdown "$RESULTS_DIR/random_read_cold.md" \
         --command-name "Cold Cache" "fio $RESULTS_DIR/random_read.fio --output-format=terse"
@@ -215,7 +193,7 @@ EOF
         --warmup 1 \
         --min-runs 3 \
         --max-runs 5 \
-        --prepare 'clear_caches; warm_directory' \
+        --prepare 'sync; sudo sh -c "echo 3 > /proc/sys/vm/drop_caches" 2>/dev/null || true; sudo '"$DISK_WARMER"' '"$TEST_DIR"' '"$DEVICE"' >/dev/null 2>&1' \
         --export-json "$RESULTS_DIR/random_read_warm.json" \
         --export-markdown "$RESULTS_DIR/random_read_warm.md" \
         --command-name "After Warming" "fio $RESULTS_DIR/random_read.fio --output-format=terse"
@@ -226,7 +204,7 @@ EOF
         --warmup 1 \
         --min-runs 3 \
         --max-runs 5 \
-        --prepare 'clear_caches' \
+        --prepare 'sync; sudo sh -c "echo 3 > /proc/sys/vm/drop_caches" 2>/dev/null || true' \
         --export-json "$RESULTS_DIR/sequential_read_cold.json" \
         --export-markdown "$RESULTS_DIR/sequential_read_cold.md" \
         --command-name "Cold Cache" "fio $RESULTS_DIR/sequential_read.fio --output-format=terse"
@@ -235,7 +213,7 @@ EOF
         --warmup 1 \
         --min-runs 3 \
         --max-runs 5 \
-        --prepare 'clear_caches; warm_directory' \
+        --prepare 'sync; sudo sh -c "echo 3 > /proc/sys/vm/drop_caches" 2>/dev/null || true; sudo '"$DISK_WARMER"' '"$TEST_DIR"' '"$DEVICE"' >/dev/null 2>&1' \
         --export-json "$RESULTS_DIR/sequential_read_warm.json" \
         --export-markdown "$RESULTS_DIR/sequential_read_warm.md" \
         --command-name "After Warming" "fio $RESULTS_DIR/sequential_read.fio --output-format=terse"
@@ -249,16 +227,11 @@ benchmark_configuration_options() {
     
     log "Benchmarking different configuration options..."
     
-    clear_caches() {
-        sync
-        sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches' 2>/dev/null || true
-    }
-    
     hyperfine \
         --warmup 1 \
         --min-runs 3 \
         --max-runs 5 \
-        --prepare 'clear_caches' \
+        --prepare 'sync; sudo sh -c "echo 3 > /proc/sys/vm/drop_caches" 2>/dev/null || true' \
         --export-json "$RESULTS_DIR/configuration_options.json" \
         --export-markdown "$RESULTS_DIR/configuration_options.md" \
         --command-name "Default (4KB reads)" "sudo $DISK_WARMER $TEST_DIR $DEVICE" \
