@@ -80,6 +80,7 @@ setup_test_environment() {
     done
     
     # Web content (mixed sizes)
+    
     sudo mkdir -p "$TEST_DIR/web"
     sudo fio --name=create_web --directory="$TEST_DIR/web" --rw=write --bs=64k --size=256M --numjobs=4 --ioengine=sync >/dev/null 2>&1
     
