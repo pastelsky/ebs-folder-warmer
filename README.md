@@ -403,6 +403,39 @@ The GitHub Actions workflow:
 | Standard x86_64 | x86_64 | Modern Linux distros | General use |
 | Portable x86_64 | x86_64 | Wide Linux compatibility | Older systems, broad compatibility |
 
+## Performance Benchmarking
+
+This project includes a comprehensive benchmarking suite to measure and validate disk warming performance.
+
+### Quick Benchmarks
+
+```bash
+# Run quick performance tests
+cd bench
+./benchmark.sh directory
+
+# Test warming effectiveness with FIO workloads
+./benchmark.sh effectiveness
+
+# Compare configuration options
+./benchmark.sh configuration
+```
+
+### Automated CI Benchmarks
+
+- **Pull Requests**: Automatic performance testing with baseline comparison
+- **Main Branch**: Effectiveness benchmarks to track performance trends
+- **Manual Triggers**: Full benchmark suite for comprehensive testing
+
+### Benchmark Features
+
+- **Hyperfine Integration**: Precise timing measurements with statistical analysis
+- **FIO Workloads**: Realistic database, web server, and EBS-optimized patterns
+- **Before/After Comparison**: Measures actual warming effectiveness
+- **CI/CD Integration**: Automated performance regression detection
+
+For detailed benchmarking documentation, see [bench/README.md](bench/README.md).
+
 ## Contributing
 
 Contributions are welcome! Please feel free to submit issues and pull requests.
@@ -413,5 +446,6 @@ Contributions are welcome! Please feel free to submit issues and pull requests.
 2. Create a feature branch
 3. Make your changes
 4. Test locally with `./build.sh`
-5. Submit a pull request
-6. CI will automatically test your changes
+5. Run benchmarks with `cd bench && ./benchmark.sh`
+6. Submit a pull request
+7. CI will automatically test and benchmark your changes

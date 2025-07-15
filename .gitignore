@@ -30,3 +30,10 @@ Thumbs.db
 
 # Build dependencies (downloaded during CI)
 disk-warmer/*.deb
+
+# Benchmark results and test data
+bench/results/
+bench/test-data/
+*.json
+*.fio.tmp
+comparison_results.md
