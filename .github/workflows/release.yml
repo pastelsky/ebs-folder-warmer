@@ -1,0 +1,252 @@
+name: Build and Release
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build for ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          # x86_64 builds
+          - target: x86_64-unknown-linux-gnu
+            arch: x86_64
+            name: disk-warmer-linux-x86_64
+            cc: gcc
+            
+          # ARM64 builds  
+          - target: aarch64-unknown-linux-gnu
+            arch: aarch64
+            name: disk-warmer-linux-aarch64
+            cc: aarch64-linux-gnu-gcc
+            
+          # Static builds (more portable)
+          - target: x86_64-unknown-linux-musl
+            arch: x86_64
+            name: disk-warmer-linux-x86_64-static
+            cc: musl-gcc
+            static: true
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential libaio-dev
+        
+        # Install cross-compilation tools for ARM64
+        if [ "${{ matrix.arch }}" = "aarch64" ]; then
+          sudo apt-get install -y gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+          # Install ARM64 libaio
+          sudo mkdir -p /usr/aarch64-linux-gnu/lib
+          wget http://ports.ubuntu.com/pool/main/liba/libaio/libaio1_0.3.113-4_arm64.deb
+          wget http://ports.ubuntu.com/pool/main/liba/libaio/libaio-dev_0.3.113-4_arm64.deb
+          sudo dpkg-deb -x libaio1_0.3.113-4_arm64.deb /tmp/libaio1
+          sudo dpkg-deb -x libaio-dev_0.3.113-4_arm64.deb /tmp/libaio-dev
+          sudo cp -r /tmp/libaio1/lib/aarch64-linux-gnu/* /usr/aarch64-linux-gnu/lib/
+          sudo cp -r /tmp/libaio-dev/usr/include/aarch64-linux-gnu/* /usr/aarch64-linux-gnu/include/ || true
+          sudo cp -r /tmp/libaio-dev/usr/lib/aarch64-linux-gnu/* /usr/aarch64-linux-gnu/lib/ || true
+        fi
+        
+        # Install musl for static builds
+        if [ "${{ matrix.static }}" = "true" ]; then
+          sudo apt-get install -y musl-tools musl-dev
+          # For static libaio, we'll need to handle this differently
+        fi
+
+    - name: Build binary
+      run: |
+        cd disk-warmer
+        
+        if [ "${{ matrix.arch }}" = "aarch64" ]; then
+          # Cross-compile for ARM64
+          export CC=aarch64-linux-gnu-gcc
+          export PKG_CONFIG_PATH=/usr/aarch64-linux-gnu/lib/pkgconfig
+          export CFLAGS="-I/usr/aarch64-linux-gnu/include"
+          export LDFLAGS="-L/usr/aarch64-linux-gnu/lib"
+          make CC=aarch64-linux-gnu-gcc TARGET=aarch64-linux-gnu
+        elif [ "${{ matrix.static }}" = "true" ]; then
+          # Static build - we'll link libaio statically
+          export CC=musl-gcc
+          # Download and compile libaio statically
+          wget http://archive.ubuntu.com/ubuntu/pool/main/liba/libaio/libaio_0.3.113.orig.tar.xz
+          tar xf libaio_0.3.113.orig.tar.xz
+          cd libaio-0.3.113
+          make CC=musl-gcc
+          cd ..
+          musl-gcc -static -o disk-warmer main.c libaio-0.3.113/src/libaio.a -I libaio-0.3.113/src -O2 -Wall
+        else
+          # Standard x86_64 build
+          make
+        fi
+        
+        # Verify the binary
+        file disk-warmer
+        ldd disk-warmer || true
+
+    - name: Create package
+      run: |
+        cd disk-warmer
+        mkdir -p ../package/${{ matrix.name }}
+        cp disk-warmer ../package/${{ matrix.name }}/
+        cp ../README.md ../package/${{ matrix.name }}/
+        
+        # Create a simple install script
+        cat > ../package/${{ matrix.name }}/install.sh << 'EOF'
+        #!/bin/bash
+        set -e
+        
+        INSTALL_DIR="/usr/local/bin"
+        
+        if [ "$EUID" -ne 0 ]; then
+          echo "Please run as root (sudo ./install.sh)"
+          exit 1
+        fi
+        
+        echo "Installing disk-warmer to $INSTALL_DIR"
+        cp disk-warmer "$INSTALL_DIR/"
+        chmod +x "$INSTALL_DIR/disk-warmer"
+        
+        echo "disk-warmer installed successfully!"
+        echo "Usage: sudo disk-warmer [OPTIONS] <directory> <device>"
+        EOF
+        
+        chmod +x ../package/${{ matrix.name }}/install.sh
+        
+        # Create tarball
+        cd ../package
+        tar -czf ${{ matrix.name }}.tar.gz ${{ matrix.name }}/
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ matrix.name }}
+        path: package/${{ matrix.name }}.tar.gz
+
+  create-release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Download all artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: ./artifacts
+
+    - name: Create Release
+      id: create_release
+      uses: actions/create-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ github.ref }}
+        release_name: Release ${{ github.ref }}
+        body: |
+          ## EBS Folder Warmer ${{ github.ref }}
+          
+          High-performance disk warming utility for AWS EBS volumes and other block devices.
+          
+          ### Downloads
+          
+          Choose the appropriate binary for your system:
+          
+          - **disk-warmer-linux-x86_64.tar.gz** - Standard x86_64 build (most common)
+          - **disk-warmer-linux-aarch64.tar.gz** - ARM64/AArch64 build (for ARM servers)
+          - **disk-warmer-linux-x86_64-static.tar.gz** - Statically linked x86_64 (most portable)
+          
+          ### Installation
+          
+          1. Download the appropriate tarball for your architecture
+          2. Extract: `tar -xzf disk-warmer-linux-*.tar.gz`
+          3. Install: `sudo ./disk-warmer-*/install.sh`
+          
+          ### Usage
+          
+          ```bash
+          # Warm directory only (default, fast)
+          sudo disk-warmer /var/lib/mysql /dev/nvme1n1
+          
+          # Full disk warming (comprehensive)
+          sudo disk-warmer --full-disk /var/lib/mysql /dev/nvme1n1
+          ```
+          
+          See README.md in the package for detailed instructions.
+          
+          ### Changes
+          
+          See commit history for detailed changes in this release.
+        draft: false
+        prerelease: false
+
+    - name: Upload Release Assets
+      run: |
+        for file in ./artifacts/*/disk-warmer-*.tar.gz; do
+          asset_name=$(basename "$file")
+          echo "Uploading $asset_name"
+          gh release upload ${{ github.ref_name }} "$file" --clobber
+        done
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Job to create releases on main branch pushes (for development releases)
+  create-dev-release:
+    name: Create Development Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Download all artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: ./artifacts
+
+    - name: Get short SHA
+      id: vars
+      run: echo "sha_short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+
+    - name: Delete existing dev release
+      run: |
+        gh release delete dev --yes || true
+        git push --delete origin dev || true
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Create Development Release
+      run: |
+        gh release create dev \
+          --title "Development Build (latest)" \
+          --notes "Automated development build from latest main branch.
+          
+          **Commit:** ${{ steps.vars.outputs.sha_short }}
+          
+          This is a development release and may be unstable. For stable releases, use tagged versions.
+          
+          ### Downloads
+          
+          - **disk-warmer-linux-x86_64.tar.gz** - Standard x86_64 build
+          - **disk-warmer-linux-aarch64.tar.gz** - ARM64/AArch64 build  
+          - **disk-warmer-linux-x86_64-static.tar.gz** - Statically linked (most portable)" \
+          --prerelease \
+          ./artifacts/*/disk-warmer-*.tar.gz
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }} 

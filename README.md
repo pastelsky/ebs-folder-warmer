@@ -26,42 +26,73 @@ This approach lets you choose between targeted directory warming or comprehensiv
 - ✅ **Progress tracking**: Real-time progress with timing information
 - ✅ **Flexible configuration**: Customizable read sizes, stride, and queue depth
 
-## Installation on Ubuntu
+## Installation
 
-### Prerequisites
+### Pre-built Binaries (Recommended)
+
+Download pre-built binaries from [GitHub Releases](https://github.com/pastelsky/ebs-folder-warmer/releases):
+
+```bash
+# Download the latest release for your architecture
+wget https://github.com/pastelsky/ebs-folder-warmer/releases/latest/download/disk-warmer-linux-x86_64.tar.gz
+
+# Extract and install
+tar -xzf disk-warmer-linux-x86_64.tar.gz
+sudo ./disk-warmer-linux-x86_64/install.sh
+```
+
+**Available builds:**
+- `disk-warmer-linux-x86_64.tar.gz` - Standard x86_64 build (most common)
+- `disk-warmer-linux-aarch64.tar.gz` - ARM64/AArch64 build (for ARM servers)
+- `disk-warmer-linux-x86_64-static.tar.gz` - Statically linked x86_64 (most portable)
+
+### Development Builds
+
+Latest development builds from the main branch are automatically available:
+- [Development Release](https://github.com/pastelsky/ebs-folder-warmer/releases/tag/dev) (updated on every push to main)
+
+### Build from Source
+
+If you prefer to build from source:
+
+#### Prerequisites
 
 Install required development packages:
 
 ```bash
-# Update package list
+# Ubuntu/Debian
 sudo apt update
-
-# Install build essentials and required libraries
 sudo apt install -y build-essential libaio-dev
 
-# For Ubuntu 18.04 and newer, libaio-dev should be sufficient
-# For older versions, you might need:
-# sudo apt install -y libaio1-dev
+# CentOS/RHEL/Fedora
+sudo yum install -y gcc make libaio-devel
+# or for newer versions:
+sudo dnf install -y gcc make libaio-devel
 ```
 
-### Build from Source
+#### Quick Build
 
 ```bash
-# Clone or download the source code
-cd disk-warmer/
+# Clone the repository
+git clone https://github.com/pastelsky/ebs-folder-warmer.git
+cd ebs-folder-warmer
 
-# Compile the disk warmer
+# Build using the provided script
+./build.sh
+
+# Or build manually
+cd disk-warmer
 make
-
-# The binary will be created as 'disk-warmer'
 ```
 
-### Manual Compilation
-
-If you don't have a Makefile:
+#### Cross-Compilation
 
 ```bash
-gcc -o disk-warmer main.c -laio -O2 -Wall
+# For ARM64 (requires cross-compilation tools)
+make arm64
+
+# For static linking (requires musl)
+make static
 ```
 
 ## Usage
@@ -322,6 +353,66 @@ echo 1048576 > /proc/sys/fs/aio-max-nr
 
 This project is open source. Please check the license file for details.
 
+## Automated Releases
+
+This project uses GitHub Actions for automated building and releasing:
+
+### Release Types
+
+**Tagged Releases** (stable):
+- Created when you push a git tag starting with `v` (e.g., `v1.2.0`)
+- Builds for multiple architectures (x86_64, ARM64, static)
+- Creates a GitHub release with binaries attached
+- Recommended for production use
+
+**Development Releases** (latest):
+- Automatically created on every push to the `main` branch
+- Available at the `dev` tag
+- Contains the latest features but may be unstable
+- Good for testing new features
+
+### Creating a Release
+
+To create a new stable release:
+
+```bash
+# Tag the current commit
+git tag v1.3.0
+git push origin v1.3.0
+
+# GitHub Actions will automatically:
+# 1. Build binaries for all architectures
+# 2. Create a GitHub release
+# 3. Upload all binaries as release assets
+```
+
+### CI/CD Pipeline
+
+The GitHub Actions workflow:
+1. **Builds** on every push and pull request
+2. **Cross-compiles** for x86_64 and ARM64 architectures  
+3. **Creates static builds** for maximum portability
+4. **Packages** binaries with install scripts and documentation
+5. **Publishes** releases automatically on tag pushes
+6. **Updates** development releases on main branch pushes
+
+### Build Matrix
+
+| Build Type | Architecture | Compatibility | Use Case |
+|------------|-------------|---------------|----------|
+| Standard x86_64 | x86_64 | Most Linux distros | General use |
+| ARM64 | aarch64 | ARM servers, AWS Graviton | ARM-based systems |
+| Static x86_64 | x86_64 | Any Linux (no deps) | Maximum portability |
+
 ## Contributing
 
 Contributions are welcome! Please feel free to submit issues and pull requests.
+
+### Development Workflow
+
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Test locally with `./build.sh`
+5. Submit a pull request
+6. CI will automatically test your changes

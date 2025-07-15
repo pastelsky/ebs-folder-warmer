@@ -1,1 +1,34 @@
+# Build artifacts
 disk-warmer/disk-warmer
+disk-warmer/disk-warmer-*
+disk-warmer/warmer
+*.o
+*.a
+*.so
+
+# Package artifacts
+package/
+*.tar.gz
+*.zip
+*.deb
+*.rpm
+
+# Temporary files
+*.tmp
+*.log
+.DS_Store
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+Thumbs.db
+
+# Build dependencies (downloaded during CI)
+disk-warmer/libaio-*/
+disk-warmer/*.deb
+disk-warmer/*.xz
