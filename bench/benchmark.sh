@@ -145,78 +145,26 @@ benchmark_full_disk_warming() {
 }
 
 benchmark_warming_effectiveness() {
-    log "Benchmarking warming effectiveness with fio workloads..."
+    if ! detect_device; then
+        warn "Skipping warming effectiveness benchmarks (no device detected)"
+        return
+    fi
     
-    # Create fio job files
-    cat > "$RESULTS_DIR/random_read.fio" << 'EOF'
-[random_read]
-directory=${TEST_DIR}/db
-rw=randread
-bs=4k
-size=512M
-numjobs=4
-ioengine=libaio
-iodepth=16
-direct=1
-time_based
-runtime=30s
-group_reporting
-EOF
-
-    cat > "$RESULTS_DIR/sequential_read.fio" << 'EOF'
-[sequential_read]
-directory=${TEST_DIR}/logs
-rw=read
-bs=1M
-size=256M
-numjobs=2
-ioengine=libaio
-iodepth=8
-direct=1
-time_based
-runtime=30s
-group_reporting
-EOF
-
-    # Test random read performance
-    log "Testing random read performance..."
+    log "Benchmarking disk warming time for different workload types..."
+    
+    # Test warming time for different directory types with realistic workloads
     hyperfine \
         --warmup 1 \
         --min-runs 3 \
         --max-runs 5 \
         --prepare 'sync; sudo sh -c "echo 3 > /proc/sys/vm/drop_caches" 2>/dev/null || true' \
-        --export-json "$RESULTS_DIR/random_read_cold.json" \
-        --export-markdown "$RESULTS_DIR/random_read_cold.md" \
-        --command-name "Cold Cache" "fio $RESULTS_DIR/random_read.fio --output-format=terse"
-    
-    hyperfine \
-        --warmup 1 \
-        --min-runs 3 \
-        --max-runs 5 \
-        --prepare 'sync; sudo sh -c "echo 3 > /proc/sys/vm/drop_caches" 2>/dev/null || true; sudo '"$DISK_WARMER"' '"$TEST_DIR"' '"$DEVICE"' >/dev/null 2>&1' \
-        --export-json "$RESULTS_DIR/random_read_warm.json" \
-        --export-markdown "$RESULTS_DIR/random_read_warm.md" \
-        --command-name "After Warming" "fio $RESULTS_DIR/random_read.fio --output-format=terse"
-    
-    # Test sequential read performance  
-    log "Testing sequential read performance..."
-    hyperfine \
-        --warmup 1 \
-        --min-runs 3 \
-        --max-runs 5 \
-        --prepare 'sync; sudo sh -c "echo 3 > /proc/sys/vm/drop_caches" 2>/dev/null || true' \
-        --export-json "$RESULTS_DIR/sequential_read_cold.json" \
-        --export-markdown "$RESULTS_DIR/sequential_read_cold.md" \
-        --command-name "Cold Cache" "fio $RESULTS_DIR/sequential_read.fio --output-format=terse"
-        
-    hyperfine \
-        --warmup 1 \
-        --min-runs 3 \
-        --max-runs 5 \
-        --prepare 'sync; sudo sh -c "echo 3 > /proc/sys/vm/drop_caches" 2>/dev/null || true; sudo '"$DISK_WARMER"' '"$TEST_DIR"' '"$DEVICE"' >/dev/null 2>&1' \
-        --export-json "$RESULTS_DIR/sequential_read_warm.json" \
-        --export-markdown "$RESULTS_DIR/sequential_read_warm.md" \
-        --command-name "After Warming" "fio $RESULTS_DIR/sequential_read.fio --output-format=terse"
+        --export-json "$RESULTS_DIR/warming_time_by_workload.json" \
+        --export-markdown "$RESULTS_DIR/warming_time_by_workload.md" \
+        --command-name "Database Files (512MB)" "sudo $DISK_WARMER $TEST_DIR/db $DEVICE" \
+        --command-name "Log Files (384MB)" "sudo $DISK_WARMER $TEST_DIR/logs $DEVICE" \
+        --command-name "Config Files (400KB)" "sudo $DISK_WARMER $TEST_DIR/config $DEVICE" \
+        --command-name "Web Content (256MB)" "sudo $DISK_WARMER $TEST_DIR/web $DEVICE" \
+        --command-name "Full Dataset (1.9GB)" "sudo $DISK_WARMER $TEST_DIR $DEVICE"
 }
 
 benchmark_configuration_options() {
