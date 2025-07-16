@@ -204,8 +204,8 @@ size_t extent_list_merge_adjacent(struct extent_list *list, long long max_merge_
                     time_t now = time(NULL);
                     if (now - last_merge_log >= LOG_INTERVAL_SECONDS)
                     {
-                        printf("Merged adjacent extents: %lld MB region\n",
-                               current->length / (1024 * 1024));
+                        printf("Merged adjacent extents: %ld MB region\n",
+                               (long)(current->length / (1024 * 1024)));
                         last_merge_log = now;
                     }
                 }
@@ -356,15 +356,15 @@ void device_align_io_params(const struct device_info *info, int use_direct_io,
     if (*read_size % alignment != 0)
     {
         *read_size = ((*read_size + alignment - 1) / alignment) * alignment;
-        printf("Adjusted read size to %lld bytes for %d-byte sector alignment\n",
-               *read_size, alignment);
+        printf("Adjusted read size to %ld bytes for %d-byte sector alignment\n",
+               (long)*read_size, alignment);
     }
 
     // Align stride
     if (*stride % alignment != 0)
     {
         *stride = ((*stride + alignment - 1) / alignment) * alignment;
-        printf("Adjusted stride to %lld bytes for sector alignment\n", *stride);
+        printf("Adjusted stride to %ld bytes for sector alignment\n", (long)*stride);
     }
 }
 
@@ -470,12 +470,18 @@ void filesystem_discover_extents(const char *directory_path, struct extent_list 
             char final_path[MAX_PATH_LENGTH];
             if (target_path[0] == '/')
             {
-                strncpy(final_path, target_path, sizeof(final_path));
+                strncpy(final_path, target_path, sizeof(final_path) - 1);
+                final_path[sizeof(final_path) - 1] = '\0';
             }
             else
             {
-                snprintf(final_path, sizeof(final_path), "%s/%s",
-                         directory_path, target_path);
+                int ret = snprintf(final_path, sizeof(final_path), "%s/%s",
+                                   directory_path, target_path);
+                if (ret >= (int)sizeof(final_path))
+                {
+                    // Path too long, skip this file
+                    continue;
+                }
             }
 
             if (stat(final_path, &st) == 0 && S_ISREG(st.st_mode))
@@ -535,8 +541,8 @@ static int execute_directory_warming_phase(const struct config *cfg, int device_
     if (!cfg->silent_mode)
         printf("=== Phase 1: Discovering and warming directory files ===\n");
     DEBUG_LOG(cfg, "Starting Phase 1: directory discovery and warming");
-    DEBUG_LOG(cfg, "Phase 1 parameters: read_size=%lld, stride=%lld, device_fd=%d",
-              read_size, stride, device_fd);
+    DEBUG_LOG(cfg, "Phase 1 parameters: read_size=%ld, stride=%ld, device_fd=%d",
+              (long)read_size, (long)stride, device_fd);
     gettimeofday(phase_start, NULL);
 
     // Process all specified directories
@@ -749,9 +755,9 @@ int main(int argc, char **argv)
     // Calculate aligned I/O parameters
     long long read_size = config.read_size_kb * 1024;
     long long stride = config.stride_kb * 1024;
-    DEBUG_LOG(&config, "Initial I/O parameters: read_size=%lld, stride=%lld", read_size, stride);
+    DEBUG_LOG(&config, "Initial I/O parameters: read_size=%ld, stride=%ld", (long)read_size, (long)stride);
     device_align_io_params(&device_info, use_direct_io, &read_size, &stride);
-    DEBUG_LOG(&config, "Aligned I/O parameters: read_size=%lld, stride=%lld", read_size, stride);
+    DEBUG_LOG(&config, "Aligned I/O parameters: read_size=%ld, stride=%ld", (long)read_size, (long)stride);
 
     // Initialize bitmap for tracking warmed blocks
     struct warmed_bitmap bitmap;

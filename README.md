@@ -46,6 +46,7 @@ sudo ./disk-warmer-linux-x86_64/install.sh
 **Available builds:**
 - `disk-warmer-linux-x86_64.tar.gz` - Standard x86_64 build (most common)
 - `disk-warmer-linux-x86_64-portable.tar.gz` - Portable x86_64 build (wide compatibility)
+- `disk-warmer-linux-x86_64-static.tar.gz` - Static x86_64 build (maximum compatibility, no library dependencies)
 
 > **Note**: ARM64/AArch64 builds will be added in a future release once cross-compilation is properly configured.
 
@@ -97,14 +98,23 @@ cd disk-warmer
 make
 ```
 
-#### Cross-Compilation
+#### Build Variants
 
 ```bash
-# For ARM64 (requires cross-compilation tools)
-make arm64
+# Standard dynamic build
+make
 
-# For static linking (requires musl)
+# Portable dynamic build
+make portable
+
+# Static build (maximum compatibility, no library dependencies)
 make static
+
+# Static build with all features (includes liburing if available)
+make static-full
+
+# For ARM64 (requires cross-compilation tools - coming soon)
+# make arm64
 ```
 
 ## Usage
@@ -428,6 +438,24 @@ gcc --version
 pkg-config --exists liburing && echo "liburing available" || echo "liburing not found, will use libaio"
 ```
 
+**Shared Library Errors (libaio.so.1t64, liburing.so.X)**
+```bash
+# If you see "error while loading shared libraries"
+# Use the static build instead - no library dependencies
+wget https://github.com/pastelsky/ebs-folder-warmer/releases/latest/download/disk-warmer-linux-x86_64-static.tar.gz
+tar -xzf disk-warmer-linux-x86_64-static.tar.gz
+sudo ./disk-warmer-linux-x86_64-static/install.sh
+
+# Or build static version locally
+cd disk-warmer
+make static
+sudo ./disk-warmer-static /your/directory /dev/your-device
+
+# Check what libraries a binary depends on
+ldd ./disk-warmer
+# Static builds will show "not a dynamic executable"
+```
+
 **AIO Setup Failed**
 ```bash
 # Check AIO limits
@@ -506,6 +534,7 @@ The GitHub Actions workflow:
 |------------|-------------|---------------|----------|
 | Standard x86_64 | x86_64 | Modern Linux distros | General use |
 | Portable x86_64 | x86_64 | Wide Linux compatibility | Older systems, broad compatibility |
+| Static x86_64 | x86_64 | Maximum compatibility | Any Linux system, no library dependencies |
 
 ## Performance Benchmarking
 
@@ -540,6 +569,77 @@ cd bench
 
 For detailed benchmarking documentation, see [bench/README.md](bench/README.md).
 
+## Static Analysis & Code Quality
+
+This project uses essential static analysis tools to ensure code quality and performance.
+
+### Quick Start
+
+```bash
+# Install analysis tools (Ubuntu/Debian)
+sudo apt-get install -y cppcheck clang-tidy
+
+# Run static analysis
+make analyze
+```
+
+### Available Analysis Tools
+
+| Tool | Purpose | Command |
+|------|---------|---------|
+| **cppcheck** | General static analysis | `make analyze-cppcheck` |
+| **clang-tidy** | Linting and modernization | `make analyze-clang-tidy` |
+
+### Sanitizer Builds
+
+Build with runtime error detection:
+
+```bash
+# Build essential sanitizer variants
+make sanitize-all
+
+# Individual sanitizers  
+make sanitize-address    # AddressSanitizer (memory errors)
+make sanitize-undefined  # UndefinedBehaviorSanitizer
+```
+
+**Testing with sanitizers:**
+```bash
+# Build and test with AddressSanitizer
+make sanitize-address
+sudo ./disk-warmer-asan /tmp/test-dir /dev/loop0
+```
+
+### Analysis Reports
+
+Static analysis generates detailed reports:
+
+- `cppcheck-report.xml` - Machine-readable cppcheck results
+
+### CI Integration
+
+- **Every PR**: Automatic static analysis with results posted as comments
+- **Every release**: Static analysis must pass before building
+- **Artifacts**: Analysis reports uploaded for 30 days
+
+### Development Best Practices
+
+1. **Run analysis locally** before committing:
+   ```bash
+   make analyze
+   ```
+
+2. **Use sanitizers** for testing:
+   ```bash
+   make sanitize-address
+   sudo ./disk-warmer-asan --help  # Test basic functionality
+   ```
+
+3. **Performance analysis**:
+   ```bash
+   make analyze-clang-tidy  # Performance suggestions
+   ```
+
 ## Contributing
 
 Contributions are welcome! Please feel free to submit issues and pull requests.
@@ -549,7 +649,15 @@ Contributions are welcome! Please feel free to submit issues and pull requests.
 1. Fork the repository
 2. Create a feature branch
 3. Make your changes
-4. Test locally with `./build.sh`
-5. Run benchmarks with `cd bench && ./benchmark.sh`
-6. Submit a pull request
-7. CI will automatically test and benchmark your changes
+4. **Run static analysis**: `make analyze`
+5. **Test with sanitizers**: `make sanitize-all`
+6. Test locally with `./build.sh`
+7. Run benchmarks with `cd bench && ./benchmark.sh`
+8. Submit a pull request
+9. CI will automatically test, analyze, and benchmark your changes
+
+### Code Quality Requirements
+
+- All static analysis checks must pass
+- Code must compile cleanly with sanitizers
+- Follow existing code style (checked by clang-tidy)

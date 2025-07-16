@@ -56,8 +56,8 @@ int io_warm_extents(int device_fd, const struct extent_list *list,
         return -1;
     }
     if (debug_mode) {
-        fprintf(stderr, "[DEBUG] io_warm_extents: Allocated %d aligned buffers of %lld bytes each\n", 
-                queue_depth, read_size);
+        fprintf(stderr, "[DEBUG] io_warm_extents: Allocated %d aligned buffers of %ld bytes each\n",
+                queue_depth, (long)read_size);
     }
 
     struct iocb iocbs[queue_depth];
@@ -250,8 +250,8 @@ int io_warm_extents_uring(int device_fd, const struct extent_list *list,
         // Fallback to regular mode if SQPOLL fails
         if (io_uring_queue_init(queue_depth, &ring, 0) != 0) {
             printf("io_uring initialization failed, falling back to libaio\n");
-            return io_warm_extents(device_fd, list, bitmap, phase_name, 
-                                 read_size, stride, queue_depth);
+            return io_warm_extents(device_fd, list, bitmap, phase_name,
+                                   read_size, stride, queue_depth, debug_mode);
         }
     }
 
@@ -354,7 +354,7 @@ int io_warm_remaining_disk_uring(int device_fd, struct warmed_bitmap *bitmap,
     if (io_uring_queue_init(queue_depth, &ring, IORING_SETUP_SQPOLL) != 0) {
         if (io_uring_queue_init(queue_depth, &ring, 0) != 0) {
             printf("io_uring initialization failed, falling back to libaio\n");
-            return io_warm_remaining_disk(device_fd, bitmap, read_size, stride, queue_depth);
+            return io_warm_remaining_disk(device_fd, bitmap, read_size, stride, queue_depth, debug_mode);
         }
     }
 

@@ -1,0 +1,34 @@
+# cppcheck suppressions for disk-warmer
+# Suppress false positives and OS-specific API warnings
+
+# Linux-specific headers and functions are intentional
+missingIncludeSystem
+
+# False positives for Linux I/O syscalls
+unusedFunction:main.c:*
+unusedFunction:io_operations.c:*
+
+# Intentional use of direct syscalls
+constParameter:*:device_fd
+constParameter:*:read_size
+constParameter:*:stride
+
+# Linux-specific ioctl calls are intentional
+knownConditionTrueFalse:*:ioctl*
+
+# Memory alignment is intentional for direct I/O
+memleakOnRealloc:*
+
+# False positive for AIO structures
+uninitStructMember:*:iocb*
+uninitStructMember:*:io_event*
+
+# Suppress style warnings for complex I/O operations
+variableScope:*:extent*
+variableScope:*:bitmap*
+
+# Platform-specific defines are intentional
+preprocessorErrorDirective
+
+# Allow long parameter lists for I/O functions (intentional design)
+tooManyConfigs

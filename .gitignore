@@ -6,6 +6,12 @@ disk-warmer/warmer
 *.a
 *.so
 
+# Static analysis reports
+disk-warmer/cppcheck-report.xml
+disk-warmer/flawfinder-report.html
+disk-warmer/scan-build-results/
+disk-warmer/plist/
+
 # Package artifacts
 package/
 *.tar.gz

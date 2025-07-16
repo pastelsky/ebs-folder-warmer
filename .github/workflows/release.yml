@@ -16,9 +16,29 @@ permissions:
   pull-requests: write
 
 jobs:
+  static-analysis:
+    name: Static Analysis Check
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install analysis tools
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential libaio-dev cppcheck clang-tidy
+
+    - name: Run quick static analysis
+      run: |
+        cd disk-warmer
+        make
+        make analyze-cppcheck analyze-clang-tidy
+
   build:
     name: Build for ${{ matrix.target }}
     runs-on: ubuntu-latest
+    needs: static-analysis
     strategy:
       matrix:
         include:
@@ -35,6 +55,13 @@ jobs:
             cc: gcc
             portable: true
 
+          # x86_64 static build (maximum compatibility)
+          - target: x86_64-unknown-linux-gnu
+            arch: x86_64
+            name: disk-warmer-linux-x86_64-static
+            cc: gcc
+            static: true
+
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
@@ -43,6 +70,12 @@ jobs:
       run: |
         sudo apt-get update
         sudo apt-get install -y build-essential libaio-dev
+        
+        # Install static libraries for static builds
+        if [ "${{ matrix.static }}" = "true" ]; then
+          echo "Installing static libraries for static build"
+          sudo apt-get install -y libaio-dev:amd64
+        fi
         
         # No additional dependencies needed for portable builds
         if [ "${{ matrix.portable }}" = "true" ]; then
@@ -53,12 +86,19 @@ jobs:
       run: |
         cd disk-warmer
         
-        # Standard x86_64 build (both regular and portable use same build)
-        make
+        # Choose build type based on matrix configuration
+        if [ "${{ matrix.static }}" = "true" ]; then
+          echo "Building static version for maximum compatibility"
+          make static
+          mv disk-warmer-static disk-warmer
+        else
+          echo "Building standard dynamic version"
+          make
+        fi
         
         # Verify the binary
         file disk-warmer
-        ldd disk-warmer || true
+        ldd disk-warmer || echo "Static binary - no dynamic dependencies"
 
     - name: Create package
       run: |
@@ -132,6 +172,7 @@ jobs:
           
           - **disk-warmer-linux-x86_64.tar.gz** - Standard x86_64 build (most common)
           - **disk-warmer-linux-x86_64-portable.tar.gz** - Portable x86_64 build (wide compatibility)
+          - **disk-warmer-linux-x86_64-static.tar.gz** - Static x86_64 build (maximum compatibility, no library dependencies)
           
           ### Installation
           
@@ -198,7 +239,8 @@ jobs:
           ### Downloads
           
           - **disk-warmer-linux-x86_64.tar.gz** - Standard x86_64 build
-          - **disk-warmer-linux-x86_64-portable.tar.gz** - Portable x86_64 (wide compatibility)" \
+          - **disk-warmer-linux-x86_64-portable.tar.gz** - Portable x86_64 (wide compatibility)
+          - **disk-warmer-linux-x86_64-static.tar.gz** - Static x86_64 (no library dependencies)" \
           --prerelease \
           ./artifacts/*/disk-warmer-*.tar.gz
       env:
