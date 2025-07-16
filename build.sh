@@ -10,7 +10,7 @@ if [[ "$OSTYPE" != "linux-gnu"* ]]; then
     echo ""
     echo "   To build and test:"
     echo "   1. Use a Linux machine or VM"
-    echo "   2. Use Docker: docker run --rm -v \$(pwd):/work -w /work ubuntu:latest bash -c 'apt update && apt install -y build-essential libaio-dev && ./build.sh'"
+    echo "   2. Use Docker: docker run --rm -v \$(pwd):/work -w /work ubuntu:latest bash -c 'apt update && apt install -y build-essential libaio-dev liburing-dev && ./build.sh'"
     echo "   3. Let GitHub Actions build it automatically on push"
     echo ""
     echo "   GitHub Actions will build for multiple architectures on every push to main."
