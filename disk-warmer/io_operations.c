@@ -1,4 +1,14 @@
+#define _POSIX_C_SOURCE 200809L
+#ifdef __linux__
+#include <libaio.h>
+#ifdef HAVE_LIBURING
+#include <liburing.h>
+#endif
+#endif
 #include "disk_warmer.h"
+#include <signal.h>
+#include <stdlib.h>
+#include <malloc.h>
 
 // Common I/O buffer management
 static int allocate_aligned_buffers(char **buffers, int count, size_t buffer_size) {

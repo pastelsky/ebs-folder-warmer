@@ -1,4 +1,22 @@
 #include "disk_warmer.h"
+#include <sys/resource.h>
+#include <sys/syscall.h>
+#include <sys/stat.h>  // Required for S_ISBLK
+#include <sys/ioctl.h> // Required for BLKSSZGET, BLKPBSZGET
+#include <fcntl.h>     // Required for O_RDONLY, O_DIRECT
+#include <unistd.h>    // Required for lseek, close, getpriority, setpriority, syscall
+#include <errno.h>     // Required for errno
+#include <stdarg.h>    // Required for va_list, va_start, va_end
+#include <stddef.h>    // Required for size_t, off_t
+#include <stdlib.h>    // Required for atol, atoi, realloc, free, calloc
+#include <string.h>    // Required for strcmp, strncmp, strcpy, snprintf
+#include <time.h>      // Required for time, time_t
+#include <sys/time.h>  // Required for struct timeval
+#include <stdio.h>     // Required for printf, fprintf, stderr, stdout, snprintf
+#include <getopt.h>    // Required for getopt_long
+#include <syslog.h>    // Required for syslog, openlog, closelog
+#include <sys/mman.h>  // Required for mmap
+#include <sys/types.h> // Required for off_t
 
 // Global state (minimized)
 time_t g_last_log_time = 0;
@@ -17,6 +35,10 @@ void config_init(struct config *cfg)
     cfg->directories = NULL;
     cfg->device_path = NULL;
     cfg->debug_mode = 0;
+    cfg->max_depth = -1;
+    cfg->num_threads = 1; // Default single-threaded
+    cfg->phase2_throttle = 0;
+    cfg->phase1_throttle = 0;
 }
 
 void config_print_help(void)
@@ -46,6 +68,10 @@ void config_print_help(void)
     printf("  -l, --syslog              Log output to syslog.\n");
     printf("      --silent              Suppress progress output to stderr.\n");
     printf("  -d, --debug               Enable verbose debug logging.\n");
+    printf("  -D, --max-depth=NUM       Limit recursion depth (default: unlimited, -1)\n");
+    printf("  -T, --threads=NUM         Number of threads for discovery (default: 1, max 16)\n");
+    printf("  -P, --phase2-throttle=LEVEL Throttle Phase 2 I/O and CPU (0=none/default, 1-7=low to high)\n");
+    printf("  -1, --phase1-throttle=LEVEL Throttle Phase 1 I/O and CPU (0=none/default, 1-7=low to high)\n");
     printf("  -h, --help                Display this help and exit.\n");
     printf("  -v, --version             Output version information and exit.\n");
 }
@@ -63,10 +89,14 @@ int config_parse_args(struct config *cfg, int argc, char **argv)
         {"debug", no_argument, 0, 'd'},
         {"help", no_argument, 0, 'h'},
         {"version", no_argument, 0, 'v'},
+        {"max-depth", required_argument, 0, 'D'},
+        {"threads", required_argument, 0, 'T'},
+        {"phase2-throttle", required_argument, 0, 'P'},
+        {"phase1-throttle", required_argument, 0, '1'},
         {0, 0, 0, 0}};
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "r:s:q:fmldhv", long_options, NULL)) != -1)
+    while ((opt = getopt_long(argc, argv, "r:s:q:fmldhvD:T:P:1:", long_options, NULL)) != -1)
     {
         switch (opt)
         {
@@ -92,6 +122,28 @@ int config_parse_args(struct config *cfg, int argc, char **argv)
             break;
         case 'd':
             cfg->debug_mode = 1;
+            break;
+        case 'D':
+            cfg->max_depth = atoi(optarg);
+            break;
+        case 'T':
+            cfg->num_threads = atoi(optarg);
+            if (cfg->num_threads < 1)
+                cfg->num_threads = 1;
+            if (cfg->num_threads > 16)
+                cfg->num_threads = 16; // Arbitrary limit
+            break;
+        case 'P':
+            cfg->phase2_throttle = atol(optarg);
+            if (cfg->phase2_throttle < 0)
+                cfg->phase2_throttle = 0;
+            if (cfg->phase2_throttle > 7)
+                cfg->phase2_throttle = 7;
+            break;
+        case '1':
+            cfg->phase1_throttle = atol(optarg);
+            if (cfg->phase1_throttle < 0) cfg->phase1_throttle = 0;
+            if (cfg->phase1_throttle > 7) cfg->phase1_throttle = 7;
             break;
         case 'h':
             config_print_help();
@@ -368,132 +420,6 @@ void device_align_io_params(const struct device_info *info, int use_direct_io,
     }
 }
 
-// File system operations
-void filesystem_extract_file_extents(const char *file_path, struct extent_list *list)
-{
-    int fd = open(file_path, O_RDONLY);
-    if (fd == -1)
-    {
-      perror(file_path);
-      return;
-  }
-
-  struct stat st;
-  if (fstat(fd, &st) == -1) {
-    close(fd);
-    return;
-  }
-
-  if (st.st_size == 0) {
-    close(fd);
-    return;
-  }
-
-  size_t fiemap_size = sizeof(struct fiemap) +
-                       (FIEMAP_EXTENT_BATCH_SIZE * sizeof(struct fiemap_extent));
-  struct fiemap *fiemap = calloc(1, fiemap_size);
-  if (!fiemap)
-  {
-      close(fd);
-      return;
-  }
-
-  __u64 offset = 0;
-  do {
-      fiemap->fm_start = offset;
-      fiemap->fm_length = (~(__u64)0ULL) - offset;
-      fiemap->fm_flags = FIEMAP_FLAG_SYNC;
-      fiemap->fm_extent_count = FIEMAP_EXTENT_BATCH_SIZE;
-      fiemap->fm_mapped_extents = 0;
-
-      if (ioctl(fd, FS_IOC_FIEMAP, fiemap) == -1)
-      {
-          perror("FIEMAP");
-          break;
-      }
-
-    if (fiemap->fm_mapped_extents == 0)
-        break;
-
-    for (unsigned i = 0; i < fiemap->fm_mapped_extents; i++)
-    {
-        struct fiemap_extent *ext = &fiemap->fm_extents[i];
-        if (ext->fe_flags & FIEMAP_EXTENT_UNKNOWN)
-            continue;
-
-        extent_list_append(list, ext->fe_physical, ext->fe_length);
-        offset = ext->fe_logical + ext->fe_length;
-
-        if (ext->fe_flags & FIEMAP_EXTENT_LAST)
-        {
-            offset = 0;
-        }
-    }
-  } while (offset > 0);
-
-  free(fiemap);
-  close(fd);
-}
-
-void filesystem_discover_extents(const char *directory_path, struct extent_list *list)
-{
-    DIR *dir = opendir(directory_path);
-    if (!dir)
-        return;
-
-  struct dirent *entry;
-  while ((entry = readdir(dir))) {
-      if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
-          continue;
-
-      char path[MAX_PATH_LENGTH];
-      snprintf(path, sizeof(path), "%s/%s", directory_path, entry->d_name);
-
-      struct stat st;
-      if (lstat(path, &st) < 0)
-      {
-          perror(path);
-          continue;
-    }
-
-    if (S_ISDIR(st.st_mode)) {
-        filesystem_discover_extents(path, list);
-    } else if (S_ISREG(st.st_mode)) {
-        filesystem_extract_file_extents(path, list);
-    } else if (S_ISLNK(st.st_mode)) {
-        char target_path[MAX_PATH_LENGTH];
-        ssize_t len = readlink(path, target_path, sizeof(target_path) - 1);
-        if (len != -1)
-        {
-            target_path[len] = '\0';
-
-            char final_path[MAX_PATH_LENGTH];
-            if (target_path[0] == '/')
-            {
-                strncpy(final_path, target_path, sizeof(final_path) - 1);
-                final_path[sizeof(final_path) - 1] = '\0';
-            }
-            else
-            {
-                int ret = snprintf(final_path, sizeof(final_path), "%s/%s",
-                                   directory_path, target_path);
-                if (ret >= (int)sizeof(final_path))
-                {
-                    // Path too long, skip this file
-                    continue;
-                }
-            }
-
-            if (stat(final_path, &st) == 0 && S_ISREG(st.st_mode))
-            {
-                filesystem_extract_file_extents(final_path, list);
-            }
-        }
-    }
-  }
-  closedir(dir);
-}
-
 // Utility functions
 void progress_print(const char *phase_name, unsigned long long current, unsigned long long total)
 {
@@ -536,7 +462,8 @@ static int execute_directory_warming_phase(const struct config *cfg, int device_
                                            struct extent_list *extent_list,
                                            struct warmed_bitmap *bitmap,
                                            long long read_size, long long stride,
-                                           struct timeval *phase_start, struct timeval *phase_end)
+                                           struct timeval *phase_start, struct timeval *phase_end,
+                                           int orig_nice, int orig_ioprio)
 {
     if (!cfg->silent_mode)
         printf("=== Phase 1: Discovering and warming directory files ===\n");
@@ -544,6 +471,17 @@ static int execute_directory_warming_phase(const struct config *cfg, int device_
     DEBUG_LOG(cfg, "Phase 1 parameters: read_size=%ld, stride=%ld, device_fd=%d",
               (long)read_size, (long)stride, device_fd);
     gettimeofday(phase_start, NULL);
+
+    if (cfg->phase1_throttle > 0) {
+        int p1_nice = 10 + cfg->phase1_throttle;
+        setpriority(PRIO_PROCESS, 0, p1_nice);
+        int p1_class = (cfg->phase1_throttle >= 4) ? 3 : 2; // Idle if >=4
+        int p1_level = (p1_class == 3) ? 0 : cfg->phase1_throttle + 3;
+        if (p1_level > 7) p1_level = 7;
+        int p1_ioprio = (p1_class << 13) | p1_level;
+        syscall(SYS_ioprio_set, 1, 0, p1_ioprio);
+        DEBUG_LOG(cfg, "Applied Phase 1 throttling: nice=%d, ioprio=0x%x", p1_nice, p1_ioprio);
+    }
 
     // Process all specified directories
     for (int i = 0; i < cfg->num_directories; i++)
@@ -554,7 +492,7 @@ static int execute_directory_warming_phase(const struct config *cfg, int device_
             syslog(LOG_INFO, "Processing directory: %s", cfg->directories[i]);
         DEBUG_LOG(cfg, "Discovering extents in directory: %s", cfg->directories[i]);
         size_t extents_before = extent_list->count;
-        filesystem_discover_extents(cfg->directories[i], extent_list);
+        filesystem_discover_extents(cfg->directories[i], extent_list, 0, cfg->max_depth, cfg->num_threads);
         DEBUG_LOG(cfg, "Directory %s added %zu extents (total now: %zu)",
                   cfg->directories[i], extent_list->count - extents_before, extent_list->count);
     }
@@ -634,19 +572,39 @@ static int execute_directory_warming_phase(const struct config *cfg, int device_
     gettimeofday(phase_end, NULL);
     timing_print_phase("Phase 1 (directory warming)",
                        timing_get_duration(*phase_start, *phase_end));
+    if (cfg->phase1_throttle > 0)
+    {
+        setpriority(PRIO_PROCESS, 0, orig_nice);
+        syscall(SYS_ioprio_set, 1, 0, orig_ioprio);
+        DEBUG_LOG(cfg, "Restored original priorities for Phase 1");
+    }
     return 0;
 }
 
 static int execute_full_disk_warming_phase(const struct config *cfg, int device_fd,
                                            struct warmed_bitmap *bitmap,
                                            long long read_size, long long stride,
-                                           struct timeval *phase_start, struct timeval *phase_end)
+                                           struct timeval *phase_start, struct timeval *phase_end,
+                                           int orig_nice, int orig_ioprio)
 {
     if (!cfg->silent_mode)
         printf("\n=== Phase 2: Warming remaining disk blocks ===\n");
     if (cfg->syslog_mode)
         syslog(LOG_INFO, "Starting phase 2: warming remaining disk blocks");
     gettimeofday(phase_start, NULL);
+
+    if (cfg->phase2_throttle > 0)
+    {
+        int p2_nice = 10 + cfg->phase2_throttle;
+        setpriority(PRIO_PROCESS, 0, p2_nice);
+        int p2_class = (cfg->phase2_throttle >= 4) ? 3 : 2; // Idle if >=4
+        int p2_level = (p2_class == 3) ? 0 : cfg->phase2_throttle + 3;
+        if (p2_level > 7)
+            p2_level = 7;
+        int p2_ioprio = (p2_class << 13) | p2_level;
+        syscall(SYS_ioprio_set, 1, 0, p2_ioprio);
+        DEBUG_LOG(cfg, "Applied Phase 2 throttling: nice=%d, ioprio=0x%x", p2_nice, p2_ioprio);
+    }
 
 #ifdef HAVE_LIBURING
     if (io_warm_remaining_disk_uring(device_fd, bitmap, read_size, stride, cfg->queue_depth, cfg->debug_mode) < 0)
@@ -655,6 +613,13 @@ static int execute_full_disk_warming_phase(const struct config *cfg, int device_
 #endif
     {
         return -1;
+    }
+
+    if (cfg->phase2_throttle > 0)
+    {
+        setpriority(PRIO_PROCESS, 0, orig_nice);
+        syscall(SYS_ioprio_set, 1, 0, orig_ioprio);
+        DEBUG_LOG(cfg, "Restored original priorities for Phase 2");
     }
 
     gettimeofday(phase_end, NULL);
@@ -686,6 +651,10 @@ int main(int argc, char **argv)
     DEBUG_LOG(&config, "  Device: %s", config.device_path);
     DEBUG_LOG(&config, "  Full disk mode: %s", config.full_disk_mode ? "enabled" : "disabled");
     DEBUG_LOG(&config, "  Merge extents: %s", config.merge_extents_enabled ? "enabled" : "disabled");
+    DEBUG_LOG(&config, "  Max depth: %d", config.max_depth);
+    DEBUG_LOG(&config, "  Number of threads: %d", config.num_threads);
+    DEBUG_LOG(&config, "  Phase 2 throttle: %d", config.phase2_throttle);
+    DEBUG_LOG(&config, "  Phase 1 throttle: %d", config.phase1_throttle);
 
     if (config.syslog_mode)
     {
@@ -772,8 +741,11 @@ int main(int argc, char **argv)
     gettimeofday(&overall_start, NULL);
 
     // Phase 1: Directory warming
+    int orig_nice = getpriority(PRIO_PROCESS, 0);
+    int orig_ioprio = syscall(SYS_ioprio_get, 1, 0);
     int result = execute_directory_warming_phase(&config, device_fd, &extent_list, &bitmap,
-                                                 read_size, stride, &phase1_start, &phase1_end);
+                                                 read_size, stride, &phase1_start, &phase1_end,
+                                                 orig_nice, orig_ioprio);
     if (result < 0)
     {
         extent_list_free(&extent_list);
@@ -786,7 +758,8 @@ int main(int argc, char **argv)
     if (config.full_disk_mode)
     {
         result = execute_full_disk_warming_phase(&config, device_fd, &bitmap,
-                                                 read_size, stride, &phase2_start, &phase2_end);
+                                                 read_size, stride, &phase2_start, &phase2_end,
+                                                 orig_nice, orig_ioprio);
         if (result < 0)
         {
             extent_list_free(&extent_list);
