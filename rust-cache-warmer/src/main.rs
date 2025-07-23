@@ -65,10 +65,10 @@ struct Opts {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let opts: Opts = Opts::parse();
-    
+    let args = Opts::parse();
+
     // Start the profiler if the --profile flag is passed
-    let guard = if opts.profile {
+    let guard = if args.profile {
         Some(pprof::ProfilerGuardBuilder::default()
             .frequency(1000) // Sample 1000 times per second
             .blocklist(&["libc", "libgcc", "pthread", "vdso"])
@@ -78,25 +78,22 @@ async fn main() -> Result<()> {
         None
     };
     
-    if opts.debug {
-        println!("Configuration: {:?}", opts);
+    if args.debug {
+        println!("Configuration: {:?}", args);
     }
 
-    let multi_progress = Arc::new(MultiProgress::new());
+    let multi_progress = MultiProgress::new();
+    let discovery_style = ProgressStyle::with_template(
+        "{spinner:.green} [{elapsed_precise}] Discovering files: {pos}",
+    )
+    .unwrap();
 
     let discovery_bar = multi_progress.add(ProgressBar::new_spinner());
-    discovery_bar.set_style(
-        ProgressStyle::with_template("{spinner:.green} Discovering files: {pos} found...")
-            .unwrap(),
-    );
+    discovery_bar.set_style(discovery_style);
     discovery_bar.enable_steady_tick(std::time::Duration::from_millis(100));
 
-    let warming_bar =
-        multi_progress.add(ProgressBar::new(0)); // Initialize with 0, will be updated after discovery
-
-    let semaphore = Arc::new(Semaphore::new(opts.queue_depth));
-    let total_bytes_warmed = Arc::new(AtomicU64::new(0));
-    let args = Arc::new(opts);
+    let args = Arc::new(args);
+    let mut file_paths = Vec::new();
 
     for path in &args.directories {
         let mut walker_builder = WalkBuilder::new(path);
@@ -111,52 +108,8 @@ async fn main() -> Result<()> {
             match result {
                 Ok(entry) => {
                     if entry.file_type().map_or(false, |ft| ft.is_file()) {
-                        let path = entry.into_path();
-                        let semaphore = semaphore.clone();
-                        let warming_bar = warming_bar.clone();
-                        let total_bytes_warmed = total_bytes_warmed.clone();
-                        let args_clone = Arc::clone(&args);
-
-                        tokio::spawn(async move {
-                            let _permit = semaphore.acquire().await.unwrap();
-
-                            let file = match File::open(&path).await {
-                                Ok(f) => f,
-                                Err(e) => {
-                                    if args_clone.debug {
-                                        eprintln!("Failed to open file {}: {}", path.display(), e);
-                                    }
-                                    return;
-                                }
-                            };
-
-                            let file_size = match file.metadata().await {
-                                Ok(metadata) => metadata.len(),
-                                Err(_) => 0,
-                            };
-                            
-                            // Use a buffered reader to read the file in chunks.
-                            // This is more memory-efficient than read_to_end for large files
-                            // and avoids allocating a large buffer for every file.
-                            let mut reader = BufReader::new(file);
-                            let mut buffer = [0; 8192]; // 8KB buffer
-
-                            loop {
-                                match reader.read(&mut buffer).await {
-                                    Ok(0) => break, // EOF reached.
-                                    Ok(_) => (),    // Bytes read, continue.
-                                    Err(e) => {
-                                        if args_clone.debug {
-                                            eprintln!("Failed to read file {}: {}", path.display(), e);
-                                        }
-                                        break; // Stop reading this file on error.
-                                    }
-                                }
-                            }
-
-                            total_bytes_warmed.fetch_add(file_size, Ordering::SeqCst);
-                            warming_bar.inc(1);
-                        });
+                        file_paths.push(entry.into_path());
+                        discovery_bar.inc(1);
                     }
                 }
                 Err(err) => {
@@ -167,15 +120,72 @@ async fn main() -> Result<()> {
             }
         }
     }
+    discovery_bar.finish_with_message(format!("Discovered {} files", file_paths.len()));
 
-    discovery_bar.finish_with_message("Discovery complete");
+    let warming_style = ProgressStyle::with_template(
+        "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] Warming files: {pos}/{len} ({percent}%)",
+    )
+    .unwrap()
+    .progress_chars("#>-");
 
-    // Wait for all warming tasks to complete. This is a simple way to wait.
-    // A more robust solution might use a channel or another synchronization primitive.
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-    while Arc::strong_count(&semaphore) > 1 {
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    let warming_bar = multi_progress.add(ProgressBar::new(file_paths.len() as u64));
+    warming_bar.set_style(warming_style);
+
+    let semaphore = Arc::new(Semaphore::new(args.queue_depth));
+    let total_bytes_warmed = Arc::new(AtomicU64::new(0));
+
+    let mut tasks = Vec::new();
+    for path in file_paths {
+        let semaphore = semaphore.clone();
+        let warming_bar = warming_bar.clone();
+        let total_bytes_warmed = total_bytes_warmed.clone();
+        let args_clone = Arc::clone(&args);
+
+        let task = tokio::spawn(async move {
+            let _permit = semaphore.acquire().await.unwrap();
+
+            let file = match File::open(&path).await {
+                Ok(f) => f,
+                Err(e) => {
+                    if args_clone.debug {
+                        eprintln!("Failed to open file {}: {}", path.display(), e);
+                    }
+                    return;
+                }
+            };
+
+            let file_size = match file.metadata().await {
+                Ok(metadata) => metadata.len(),
+                Err(_) => 0,
+            };
+
+            let mut reader = BufReader::new(file);
+            let mut buffer = [0; 8192];
+
+            loop {
+                match reader.read(&mut buffer).await {
+                    Ok(0) => break,
+                    Ok(_) => (),
+                    Err(e) => {
+                        if args_clone.debug {
+                            eprintln!("Failed to read file {}: {}", path.display(), e);
+                        }
+                        break;
+                    }
+                }
+            }
+
+            total_bytes_warmed.fetch_add(file_size, Ordering::SeqCst);
+            warming_bar.inc(1);
+        });
+        tasks.push(task);
     }
+    
+    stream::iter(tasks)
+        .for_each_concurrent(None, |task| async {
+            let _ = task.await;
+        })
+        .await;
 
 
     warming_bar.finish_with_message("Done");
