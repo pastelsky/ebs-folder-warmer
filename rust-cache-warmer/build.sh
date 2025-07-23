@@ -24,10 +24,15 @@ error() {
 # 1. CHECK FOR RUST TOOLCHAIN
 info "Checking for Rust toolchain (cargo)..."
 if ! command -v cargo &> /dev/null; then
-    error "Rust and Cargo are not installed. Please install them to continue."
-    info "You can usually install Rust by running:"
-    info "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
-    exit 1
+    warn "Rust and Cargo are not installed."
+    
+    # Provide Ubuntu-specific instructions if possible
+    if command -v apt-get &> /dev/null; then
+        info "To install on Ubuntu, you can run:"
+        info "sudo apt-get update && sudo apt-get install -y cargo"
+    fi
+    
+    error "Please install Rust/Cargo to continue. The official method is to run: \n      curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
 else
     info "Rust toolchain found."
 fi
