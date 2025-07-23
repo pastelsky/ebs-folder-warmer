@@ -9,6 +9,7 @@ use std::sync::Arc;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, BufReader};
 use tokio::sync::Semaphore;
+use log::{debug, info, warn, error};
 
 #[derive(Parser, Debug)]
 #[clap(
@@ -78,9 +79,16 @@ async fn main() -> Result<()> {
         None
     };
     
+    // Initialize logger
     if args.debug {
-        println!("Configuration: {:?}", args);
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("debug")).init();
+    } else {
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     }
+
+    debug!("Configuration: {:?}", args);
+
+    debug!("Starting file discovery phase");
 
     let multi_progress = MultiProgress::new();
     let discovery_style = ProgressStyle::with_template(
@@ -96,6 +104,7 @@ async fn main() -> Result<()> {
     let mut file_paths = Vec::new();
 
     for path in &args.directories {
+        debug!("Walking directory: {}", path.display());
         let mut walker_builder = WalkBuilder::new(path);
         let walker = walker_builder
             .threads(args.threads.unwrap_or_else(num_cpus::get))
@@ -108,18 +117,20 @@ async fn main() -> Result<()> {
             match result {
                 Ok(entry) => {
                     if entry.file_type().map_or(false, |ft| ft.is_file()) {
+                        debug!("Found file: {}", entry.path().display());
                         file_paths.push(entry.into_path());
                         discovery_bar.inc(1);
+                    } else {
+                        debug!("Skipped non-file: {}", entry.path().display());
                     }
                 }
                 Err(err) => {
-                    if args.debug {
-                        eprintln!("[DEBUG] Failed to process directory entry: {}", err);
-                    }
+                    debug!("Failed to process directory entry: {}", err);
                 }
             }
         }
     }
+    debug!("File discovery phase complete. {} files found.", file_paths.len());
     discovery_bar.finish_with_message(format!("Discovered {} files", file_paths.len()));
 
     let warming_style = ProgressStyle::with_template(
@@ -134,6 +145,8 @@ async fn main() -> Result<()> {
     let semaphore = Arc::new(Semaphore::new(args.queue_depth));
     let total_bytes_warmed = Arc::new(AtomicU64::new(0));
 
+    debug!("Starting file warming phase");
+
     let mut tasks = Vec::new();
     for path in file_paths {
         let semaphore = semaphore.clone();
@@ -144,12 +157,12 @@ async fn main() -> Result<()> {
         let task = tokio::spawn(async move {
             let _permit = semaphore.acquire().await.unwrap();
 
+            debug!("Warming file: {}", path.display());
+
             let file = match File::open(&path).await {
                 Ok(f) => f,
                 Err(e) => {
-                    if args_clone.debug {
-                        eprintln!("Failed to open file {}: {}", path.display(), e);
-                    }
+                    debug!("Failed to open file {}: {}", path.display(), e);
                     return;
                 }
             };
@@ -161,19 +174,22 @@ async fn main() -> Result<()> {
 
             let mut reader = BufReader::new(file);
             let mut buffer = [0; 8192];
+            let mut total_read = 0u64;
 
             loop {
                 match reader.read(&mut buffer).await {
                     Ok(0) => break,
-                    Ok(_) => (),
+                    Ok(n) => {
+                        total_read += n as u64;
+                    },
                     Err(e) => {
-                        if args_clone.debug {
-                            eprintln!("Failed to read file {}: {}", path.display(), e);
-                        }
+                        debug!("Failed to read file {}: {}", path.display(), e);
                         break;
                     }
                 }
             }
+
+            debug!("Finished warming file: {} ({} bytes read)", path.display(), total_read);
 
             total_bytes_warmed.fetch_add(file_size, Ordering::SeqCst);
             warming_bar.inc(1);
@@ -187,19 +203,22 @@ async fn main() -> Result<()> {
         })
         .await;
 
+    debug!("File warming phase complete");
 
     warming_bar.finish_with_message("Done");
     multi_progress.clear().unwrap();
-    println!("Cache warming complete. Warmed {} bytes.", total_bytes_warmed.load(Ordering::SeqCst));
+    info!("Cache warming complete. Warmed {} bytes.", total_bytes_warmed.load(Ordering::SeqCst));
     
     // If profiling was enabled, generate the report.
     if let Some(guard) = guard {
         if let Ok(report) = guard.report().build() {
             let file = std::fs::File::create("flamegraph.svg").unwrap();
             report.flamegraph(file).unwrap();
-            println!("Profiling complete. Flamegraph saved to flamegraph.svg");
+            info!("Profiling complete. Flamegraph saved to flamegraph.svg");
         };
     }
+
+    debug!("All phases complete. Exiting.");
 
     Ok(())
 }
