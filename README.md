@@ -141,6 +141,9 @@ sudo ./disk-warmer [OPTIONS] <directory> <device>
 | `-m, --merge-extents` | Merge adjacent extents for larger sequential reads | disabled |
 | `-l, --syslog` | Log output to syslog | disabled |
 | `--silent` | Suppress progress output to stderr | disabled |
+| `-D, --max-depth=NUM` | Limit directory traversal depth (default: -1 unlimited) | -1 |
+| `-T, --threads=NUM` | Number of threads for directory discovery (default: 1) | 1 |
+| `-P, --phase2-throttle=LEVEL` | Throttle Phase 2 in full-disk mode (0=none, 1-7=low to high) | 0 |
 | `-h, --help` | Display help and exit | - |
 | `-v, --version` | Output version information and exit | - |
 
@@ -179,6 +182,12 @@ sudo ./disk-warmer \
 ```bash
 sudo ./disk-warmer --silent --syslog /home/ubuntu/important-data /dev/nvme2n1
 ```
+
+#### Parallel Warming for Large Directories
+sudo ./disk-warmer --threads=8 --max-depth=5 /path/to/large/dir /dev/nvme1n1
+
+#### Throttled Full Disk Mode
+sudo ./disk-warmer --full-disk --phase2-throttle=5 /var/lib/mysql /dev/nvme1n1
 
 ### Sample Output
 
@@ -332,6 +341,11 @@ The latest version includes several performance enhancements based on recent Lin
 - **EBS-Aware Limits**: Caps merges at 16MB to respect S3 object boundaries
 - **Reduced I/O Overhead**: Fewer requests to EBS, better for fragmented databases
 - **Conditional Benefit**: Most effective with fragmented files (databases, VMs)
+
+### Advanced Features
+- **Parallel Directory Traversal (--threads)**: Speeds up extent discovery for large directories (e.g., node_modules) by using multiple threads. Use 4-8 on multi-core systems.
+- **Depth Limiting (--max-depth)**: Limits how deep to traverse directories, useful for skipping deeply nested irrelevant files.
+- **Phase 2 Throttling (--phase2-throttle)**: Reduces CPU/I/O priority in full-disk mode's Phase 2 for background operation without impacting system performance.
 
 ### Performance Tips
 ```bash

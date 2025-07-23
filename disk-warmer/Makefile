@@ -10,12 +10,12 @@ ifeq ($(LIBURING_AVAILABLE),yes)
 endif
 
 # Source files
-SOURCES = main.c io_operations.c
+SOURCES = main.c io_operations.c filesystem.c
 HEADERS = disk_warmer.h
 TARGET = disk-warmer
 
 # Object files
-OBJECTS = $(SOURCES:.c=.o)
+OBJECTS = main.o io_operations.o filesystem.o
 
 # Default target
 all: $(TARGET)
@@ -27,6 +27,9 @@ $(TARGET): $(OBJECTS)
 # Build object files
 %.o: %.c $(HEADERS)
 	$(CC) $(CFLAGS) -c $< -o $@
+
+filesystem.o: filesystem.c disk_warmer.h
+	$(CC) $(CFLAGS) -c filesystem.c
 
 # Install target
 install: $(TARGET)
@@ -139,6 +142,9 @@ endif
 	@echo "  CFLAGS    - Compiler flags (default: -O2 -Wall -std=c99)"
 	@echo "  LDFLAGS   - Linker flags (default: -laio, +luring if available)"
 	@echo "  DESTDIR   - Install destination prefix"
+
+test: $(TARGET)
+	cd tests && ./e2e_warming.sh
 
 .PHONY: all install clean portable static static-full debug \
         analyze analyze-cppcheck analyze-clang-tidy \

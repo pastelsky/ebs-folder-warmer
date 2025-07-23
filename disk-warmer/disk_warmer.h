@@ -12,28 +12,31 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
+#ifdef __linux__
 #include <linux/fs.h>
 #include <linux/fiemap.h>
-#include <limits.h>
-#include <errno.h>
 #include <linux/types.h>
 #include <libaio.h>
+#endif
 #include <getopt.h>
 #include <syslog.h>
 #include <time.h>
 #include <sys/time.h>
 #include <signal.h>
+#include <pthread.h>
 
 #ifdef HAVE_LIBURING
 #include <liburing.h>
 #endif
 
 // Additional includes for block device ioctls
+#ifdef __linux__
 #ifndef BLKSSZGET
 #define BLKSSZGET _IO(0x12, 104)
 #endif
 #ifndef BLKPBSZGET
 #define BLKPBSZGET _IO(0x12, 123)
+#endif
 #endif
 
 // Constants
@@ -106,6 +109,10 @@ struct config {
     const char **directories;
     const char *device_path;
     int debug_mode;
+    int max_depth;
+    int num_threads;
+    int phase1_throttle;
+    int phase2_throttle;
 };
 
 struct timing_info {
@@ -144,8 +151,8 @@ void device_align_io_params(const struct device_info *info, int use_direct_io,
                            long long *read_size, long long *stride);
 
 // File system operations
-void filesystem_discover_extents(const char *directory_path, struct extent_list *list);
 void filesystem_extract_file_extents(const char *file_path, struct extent_list *list);
+void filesystem_discover_extents(const char *directory_path, struct extent_list *list, int current_depth, int max_depth, int num_threads);
 
 // I/O warming operations
 int io_warm_extents(int device_fd, const struct extent_list *list, 
