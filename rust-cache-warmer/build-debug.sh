@@ -47,6 +47,9 @@ else
 fi
 
 # 3. BUILD THE PROJECT
+info "Removing old Cargo.lock file to ensure compatibility..."
+rm -f Cargo.lock
+
 info "Building 'rust-cache-warmer' in release mode with debug symbols..."
 if cargo build --release; then
     info "Build successful!"

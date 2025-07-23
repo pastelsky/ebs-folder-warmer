@@ -43,6 +43,10 @@ info "Building 'rust-cache-warmer' in release mode (this may take a moment)..."
 # Navigate to the script's directory to ensure we can find the Cargo.toml file.
 cd "$(dirname "$0")"
 
+# Remove the old lock file to avoid version conflicts
+info "Removing old Cargo.lock file to ensure compatibility..."
+rm -f Cargo.lock
+
 if cargo build --release; then
     info "Build successful!"
 else
