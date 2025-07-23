@@ -1,12 +1,11 @@
 #!/bin/bash
 
-# A script to prepare the 'rust-cache-warmer' project for profiling.
+# A script to prepare the 'rust-cache-warmer' project for profiling with pprof-rs.
 # This script will:
 # 1. Check for the Rust toolchain.
-# 2. Install 'cargo-flamegraph' if it's not already installed.
-# 3. Verify the Cargo.toml is configured for debug symbols.
-# 4. Build the project in release mode.
-# 5. Provide the command to run the profiler.
+# 2. Verify the Cargo.toml is configured for debug symbols.
+# 3. Build the project in release mode.
+# 4. Provide the command to run the profiler.
 
 # Exit immediately if a command exits with a non-zero status.
 set -e
@@ -36,20 +35,7 @@ else
     info "Rust toolchain found."
 fi
 
-# 2. INSTALL FLAMEGRAPH
-info "Checking for 'cargo-flamegraph'..."
-if ! cargo flamegraph --version &> /dev/null; then
-    warn "'cargo-flamegraph' is not installed. Installing now..."
-    if cargo install flamegraph; then
-        info "Successfully installed 'cargo-flamegraph'."
-    else
-        error "Failed to install 'cargo-flamegraph'. Please try installing it manually with 'cargo install flamegraph'."
-    fi
-else
-    info "'cargo-flamegraph' is already installed."
-fi
-
-# 3. VERIFY CARGO.TOML CONFIGURATION
+# 2. VERIFY CARGO.TOML CONFIGURATION
 info "Verifying 'Cargo.toml' for debug symbols in release mode..."
 if ! grep -q "\[profile.release\]" Cargo.toml || ! grep -q "debug = true" Cargo.toml; then
     warn "'Cargo.toml' is not configured to generate debug symbols for release builds."
@@ -60,7 +46,7 @@ else
     info "'Cargo.toml' is correctly configured."
 fi
 
-# 4. BUILD THE PROJECT
+# 3. BUILD THE PROJECT
 info "Building 'rust-cache-warmer' in release mode with debug symbols..."
 if cargo build --release; then
     info "Build successful!"
@@ -68,12 +54,12 @@ else
     error "Cargo build failed. Please check the compilation errors above."
 fi
 
-# 5. PROVIDE PROFILING INSTRUCTIONS
-BINARY_NAME="rust-cache-warmer"
+# 4. PROVIDE PROFILING INSTRUCTIONS
 echo
 info "Setup complete! The project is ready for profiling."
-info "To generate a flamegraph, run the following command from the repository root:"
-warn "Note: This command requires 'sudo' because the profiler needs elevated permissions to inspect the running process."
+info "To generate a flamegraph, run the binary with the '--profile' flag."
+info "Example command (run from the repository root):"
 echo
-echo "  sudo cargo flamegraph --root --manifest-path rust-cache-warmer/Cargo.toml -- ."
-echo 
+echo "  ./rust-cache-warmer/target/release/rust-cache-warmer --profile ."
+echo
+info "A 'flamegraph.svg' file will be created in the 'rust-cache-warmer' directory." 

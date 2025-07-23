@@ -4,6 +4,7 @@ use futures::stream::{self, StreamExt};
 use ignore::WalkBuilder;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
@@ -57,11 +58,25 @@ struct Opts {
 
     #[clap(long, help = "Print detailed debug information.")]
     debug: bool,
+    
+    #[clap(long, help = "Enable profiling and generate a flamegraph.svg")]
+    profile: bool,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let opts: Opts = Opts::parse();
+    
+    // Start the profiler if the --profile flag is passed
+    let guard = if opts.profile {
+        Some(pprof::ProfilerGuardBuilder::default()
+            .frequency(1000) // Sample 1000 times per second
+            .blocklist(&["libc", "libgcc", "pthread", "vdso"])
+            .build()
+            .unwrap())
+    } else {
+        None
+    };
     
     if opts.debug {
         println!("Configuration: {:?}", opts);
@@ -160,6 +175,15 @@ async fn main() -> Result<()> {
 
     warming_bar.finish_with_message("Warming complete!");
     multi_progress.clear().unwrap();
+
+    // If profiling was enabled, generate the report.
+    if let Some(guard) = guard {
+        if let Ok(report) = guard.report().build() {
+            let file = std::fs::File::create("flamegraph.svg").unwrap();
+            report.flamegraph(file).unwrap();
+            println!("Profiling complete. Flamegraph saved to flamegraph.svg");
+        };
+    }
 
     Ok(())
 }
