@@ -11,3 +11,6 @@ indicatif = "0.17"
 anyhow = "1.0"
 futures = "0.3"
 num_cpus = "1.16"
+
+[profile.release]
+debug = true
