@@ -1,49 +1,45 @@
-# rust-cache-warmer
+# Rust Cache Warmer
 
-A high-performance, cross-platform utility to warm the operating system's page cache by reading files from one or more directories. Written in idiomatic Rust, it uses a multi-threaded and asynchronous approach to saturate I/O and warm the cache as quickly as possible.
-
-This tool is ideal for preparing systems for performance-sensitive workloads, especially inside Docker containers or on systems where raw block device access is not available.
+A high-performance, concurrent file cache warmer written in Rust.
 
 ## Features
-
-- **High Performance:** Uses a multi-threaded file discovery and an asynchronous, concurrent file reading engine powered by Tokio.
-- **Cross-Platform:** Works on Linux, macOS, and Windows.
-- **Docker Friendly:** Does not require elevated permissions or access to raw block devices.
-- **Efficient:** Reads files in small chunks to warm the cache without consuming significant memory.
-- **User-Friendly:** Provides clear progress bars and flexible command-line options.
-- **Smart Discovery:** Can optionally respect `.gitignore` files and limit directory traversal depth.
-
-## Installation
-
-You can download the latest pre-compiled binary for Linux from the [**GitHub Releases**](https://github.com/pastelsky/ebs-folder-warmer/releases) page.
-
-1.  **Download the Asset:**
-    Go to the latest release and download the `rust-cache-warmer-linux-amd64` binary.
-
-2.  **Make it Executable:**
-    ```bash
-    chmod +x ./rust-cache-warmer-linux-amd64
-    ```
-
-3.  **Move to Your PATH:**
-    Move the binary to a directory in your system's `PATH` to make it accessible from anywhere.
-    ```bash
-    sudo mv ./rust-cache-warmer-linux-amd64 /usr/local/bin/rust-cache-warmer
-    ```
-
-4.  **Run it!**
-    ```bash
-    rust-cache-warmer --help
-    ```
+- Concurrent file reading with adjustable queue depth
+- Multi-threaded directory traversal
+- Optional respect for .gitignore files
+- Follow symbolic links
+- Maximum traversal depth
+- Debug logging
+- Profiling with flamegraph
+- Ignore hidden files (optional)
+- Skip files larger than a specified size
+- Sparse reading for large files to efficiently warm cache
+- OS-specific cache advice for faster warming on Linux and macOS
 
 ## Usage
 
-Warm the cache for all files in the specified directories:
-```bash
-rust-cache-warmer /path/to/your/data /another/directory
+```sh
+rust-cache-warmer [OPTIONS] <DIRECTORIES>...
 ```
 
-For a full list of options, run:
-```bash
-rust-cache-warmer --help
+### Options
+- `-q, --queue-depth <QUEUE_DEPTH>`: Number of concurrent files to read (default: 128)
+- `-T, --threads <THREADS>`: Number of threads for file discovery
+- `--follow-symlinks`: Follow symbolic links
+- `--respect-gitignore`: Respect .gitignore files
+- `--max-depth <DEPTH>`: Maximum directory traversal depth
+- `--debug`: Enable debug logging
+- `--profile`: Enable profiling and generate flamegraph.svg
+- `--ignore-hidden`: Ignore hidden files and directories
+- `--max-file-size <BYTES>`: Skip files larger than this size (0 = no limit)
+- `--sparse-large-files <BYTES>`: Use sparse reading for files larger than this size (0 = disabled)
+
+### Examples
+Warm cache for a directory:
+```sh
+rust-cache-warmer /path/to/dir
+```
+
+Skip files > 1GB and use sparse read for files > 100MB:
+```sh
+rust-cache-warmer --max-file-size 1000000000 --sparse-large-files 100000000 /path/to/dir
 ``` 
