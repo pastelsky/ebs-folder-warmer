@@ -7,9 +7,16 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::fs::File;
-use tokio::io::{AsyncReadExt, BufReader};
+use tokio::io::{AsyncReadExt, BufReader, AsyncSeekExt};
 use tokio::sync::Semaphore;
-use log::{debug, info, warn, error};
+use log::{debug, info};
+use std::time::Instant;
+#[cfg(target_os = "linux")]
+use nix::fcntl::{posix_fadvise, PosixFadviseAdvice};
+#[cfg(target_os = "macos")]
+use nix::sys::mman::{madvise, MmapAdvise};
+use std::os::unix::prelude::AsRawFd;
+use std::ptr::NonNull;
 
 #[derive(Parser, Debug)]
 #[clap(
@@ -62,6 +69,34 @@ struct Opts {
     
     #[clap(long, help = "Enable profiling and generate a flamegraph.svg")]
     profile: bool,
+
+    #[clap(long, help = "Ignore hidden files and directories (those starting with '.'). Disabled by default.")]
+    ignore_hidden: bool,
+
+    #[clap(long, default_value = "0", help = "Skip files larger than this size in bytes (0 means no limit).")]
+    max_file_size: u64,
+
+    #[clap(long, default_value = "0", help = "Use sparse reading for files larger than this size in bytes (0 means disabled). Reads 1 byte every 4096 bytes to warm cache efficiently.")]
+    sparse_large_files: u64,
+}
+
+#[cfg(target_os = "linux")]
+fn warm_with_fadvise(file: &File, file_size: u64) -> bool {
+    let fd = file.as_raw_fd();
+    posix_fadvise(fd, 0, file_size as i64, PosixFadviseAdvice::POSIX_FADV_WILLNEED).is_ok()
+}
+#[cfg(target_os = "macos")]
+fn warm_with_madvise(file: &File, file_size: u64) -> bool {
+    let fd = file.as_raw_fd();
+    let ptr = unsafe { nix::libc::mmap(std::ptr::null_mut(), file_size as usize, nix::libc::PROT_NONE, nix::libc::MAP_SHARED, fd, 0) };
+    if ptr != nix::libc::MAP_FAILED {
+        let nn_ptr = NonNull::new(ptr).expect("mmap returned non-null but failed to create NonNull");
+        let res = unsafe { madvise(nn_ptr, file_size as usize, MmapAdvise::MADV_WILLNEED) };
+        unsafe { nix::libc::munmap(ptr, file_size as usize) };
+        res.is_ok()
+    } else {
+        false
+    }
 }
 
 #[tokio::main]
@@ -86,9 +121,11 @@ async fn main() -> Result<()> {
         env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     }
 
+    let total_start = Instant::now();
     debug!("Configuration: {:?}", args);
 
     debug!("Starting file discovery phase");
+    let discovery_start = Instant::now();
 
     let multi_progress = MultiProgress::new();
     let discovery_style = ProgressStyle::with_template(
@@ -111,17 +148,15 @@ async fn main() -> Result<()> {
             .follow_links(args.follow_symlinks)
             .max_depth(args.max_depth)
             .git_ignore(!args.respect_gitignore)
+            .hidden(args.ignore_hidden)  // Skip hidden if flag is set
             .build();
 
         for result in walker {
             match result {
                 Ok(entry) => {
                     if entry.file_type().map_or(false, |ft| ft.is_file()) {
-                        debug!("Found file: {}", entry.path().display());
                         file_paths.push(entry.into_path());
                         discovery_bar.inc(1);
-                    } else {
-                        debug!("Skipped non-file: {}", entry.path().display());
                     }
                 }
                 Err(err) => {
@@ -132,6 +167,11 @@ async fn main() -> Result<()> {
     }
     debug!("File discovery phase complete. {} files found.", file_paths.len());
     discovery_bar.finish_with_message(format!("Discovered {} files", file_paths.len()));
+
+    let discovery_duration = discovery_start.elapsed();
+    if !args.debug {
+        println!("File discovery took {:.2?}", discovery_duration);
+    }
 
     let warming_style = ProgressStyle::with_template(
         "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] Warming files: {pos}/{len} ({percent}%)",
@@ -146,6 +186,7 @@ async fn main() -> Result<()> {
     let total_bytes_warmed = Arc::new(AtomicU64::new(0));
 
     debug!("Starting file warming phase");
+    let warming_start = Instant::now();
 
     let mut tasks = Vec::new();
     for path in file_paths {
@@ -157,9 +198,7 @@ async fn main() -> Result<()> {
         let task = tokio::spawn(async move {
             let _permit = semaphore.acquire().await.unwrap();
 
-            debug!("Warming file: {}", path.display());
-
-            let file = match File::open(&path).await {
+            let mut file = match File::open(&path).await {
                 Ok(f) => f,
                 Err(e) => {
                     debug!("Failed to open file {}: {}", path.display(), e);
@@ -169,27 +208,76 @@ async fn main() -> Result<()> {
 
             let file_size = match file.metadata().await {
                 Ok(metadata) => metadata.len(),
-                Err(_) => 0,
+                Err(e) => {
+                    debug!("Failed to get metadata for {}: {}", path.display(), e);
+                    return;
+                }
             };
 
-            let mut reader = BufReader::new(file);
-            let mut buffer = [0; 8192];
-            let mut total_read = 0u64;
+            if args_clone.max_file_size > 0 && file_size > args_clone.max_file_size {
+                debug!("Skipping large file: {} (size: {} > max: {})", path.display(), file_size, args_clone.max_file_size);
+                warming_bar.inc(1);
+                return;
+            }
 
-            loop {
-                match reader.read(&mut buffer).await {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        total_read += n as u64;
-                    },
-                    Err(e) => {
-                        debug!("Failed to read file {}: {}", path.display(), e);
-                        break;
+            let warmed = if cfg!(target_os = "linux") {
+                #[cfg(target_os = "linux")]
+                { warm_with_fadvise(&file, file_size) }
+                #[cfg(not(target_os = "linux"))]
+                { false }
+            } else if cfg!(target_os = "macos") {
+                #[cfg(target_os = "macos")]
+                { warm_with_madvise(&file, file_size) }
+                #[cfg(not(target_os = "macos"))]
+                { false }
+            } else {
+                false
+            };
+
+            if warmed {
+
+            } else {
+                if args_clone.sparse_large_files > 0 && file_size > args_clone.sparse_large_files {
+                    let page_size: u64 = 4096;
+                    let mut offset: u64 = 0;
+
+                    while offset < file_size {
+                        if let Err(e) = file.seek(std::io::SeekFrom::Start(offset)).await {
+                            debug!("Failed to seek in file {} at offset {}: {}", path.display(), offset, e);
+                            break;
+                        }
+                        let mut byte = [0; 1];
+                        match file.read(&mut byte).await {
+                            Ok(n) => {
+                                if n == 0 {
+                                    break;
+                                }
+                            }
+                            Err(e) => {
+                                debug!("Failed to read byte in file {} at offset {}: {}", path.display(), offset, e);
+                                break;
+                            }
+                        }
+                        offset += page_size;
+                    }
+
+                } else {
+                    let mut reader = BufReader::new(file);
+                    let mut buffer = [0; 8192];
+
+                    loop {
+                        match reader.read(&mut buffer).await {
+                            Ok(0) => break,
+                            Ok(n) => {
+                            },
+                            Err(e) => {
+                                debug!("Failed to read file {}: {}", path.display(), e);
+                                break;
+                            }
+                        }
                     }
                 }
             }
-
-            debug!("Finished warming file: {} ({} bytes read)", path.display(), total_read);
 
             total_bytes_warmed.fetch_add(file_size, Ordering::SeqCst);
             warming_bar.inc(1);
@@ -204,10 +292,18 @@ async fn main() -> Result<()> {
         .await;
 
     debug!("File warming phase complete");
+    let warming_duration = warming_start.elapsed();
+    if !args.debug {
+        println!("File warming took {:.2?}", warming_duration);
+    }
 
     warming_bar.finish_with_message("Done");
     multi_progress.clear().unwrap();
-    info!("Cache warming complete. Warmed {} bytes.", total_bytes_warmed.load(Ordering::SeqCst));
+    info!(
+        "Cache warming complete. Warmed {} bytes in {:.2?}.",
+        total_bytes_warmed.load(Ordering::SeqCst),
+        warming_duration
+    );
     
     // If profiling was enabled, generate the report.
     if let Some(guard) = guard {
@@ -219,6 +315,10 @@ async fn main() -> Result<()> {
     }
 
     debug!("All phases complete. Exiting.");
+    let total_duration = total_start.elapsed();
+    if !args.debug {
+        println!("Total execution time: {:.2?}", total_duration);
+    }
 
     Ok(())
 }
