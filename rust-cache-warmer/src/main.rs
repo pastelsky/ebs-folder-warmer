@@ -22,7 +22,7 @@ use std::ptr::NonNull;
 #[derive(Parser, Debug)]
 #[clap(
     name = "rust-cache-warmer",
-    version = "1.1.0",
+    version = "1.2.0",
     author = "AI Assistant",
     about = "A high-performance, concurrent file cache warmer written in Rust."
 )]
@@ -79,6 +79,9 @@ struct Opts {
 
     #[clap(long, default_value = "0", help = "Use sparse reading for files larger than this size in bytes (0 means disabled). Reads 1 byte every 4096 bytes to warm cache efficiently.")]
     sparse_large_files: u64,
+
+    #[clap(long, default_value = "1000", help = "Number of files to process per async task batch. Higher values reduce coordination overhead for small files.")]
+    batch_size: usize,
 }
 
 #[cfg(target_os = "linux")]
@@ -152,13 +155,14 @@ async fn main() -> Result<()> {
 
     let args = Arc::new(args);
     
-    // Use a channel-based approach for streaming file processing
-    let (tx, mut rx) = mpsc::unbounded_channel::<PathBuf>();
+    // Use a channel-based approach for batch file processing
+    let (tx, rx) = mpsc::unbounded_channel::<Vec<PathBuf>>();
     
     // Spawn file discovery task
     let discovery_args = Arc::clone(&args);
     let discovery_handle = tokio::spawn(async move {
         let mut file_count = 0u64;
+        let mut current_batch = Vec::with_capacity(discovery_args.batch_size);
         
         for path in &discovery_args.directories {
             debug!("Walking directory: {}", path.display());
@@ -175,17 +179,30 @@ async fn main() -> Result<()> {
                 match result {
                     Ok(entry) => {
                         if entry.file_type().map_or(false, |ft| ft.is_file()) {
-                            if tx.send(entry.into_path()).is_err() {
-                                debug!("Receiver dropped, stopping file discovery");
-                                return file_count;
-                            }
+                            current_batch.push(entry.into_path());
                             file_count += 1;
+                            
+                            // Send batch when it reaches the configured size
+                            if current_batch.len() >= discovery_args.batch_size {
+                                if tx.send(current_batch.clone()).is_err() {
+                                    debug!("Receiver dropped, stopping file discovery");
+                                    return file_count;
+                                }
+                                current_batch.clear();
+                            }
                         }
                     }
                     Err(err) => {
                         debug!("Failed to process directory entry: {}", err);
                     }
                 }
+            }
+        }
+        
+        // Send any remaining files in the final batch
+        if !current_batch.is_empty() {
+            if tx.send(current_batch).is_err() {
+                debug!("Receiver dropped during final batch send");
             }
         }
         
@@ -200,13 +217,13 @@ async fn main() -> Result<()> {
     debug!("Starting concurrent file warming");
     let warming_start = Instant::now();
 
-    // Process files as they're discovered using a stream with controlled concurrency
-    let file_stream = stream::unfold(rx, |mut rx| async move {
-        rx.recv().await.map(|path| (path, rx))
+    // Process file batches as they're discovered using a stream with controlled concurrency
+    let batch_stream = stream::unfold(rx, |mut rx| async move {
+        rx.recv().await.map(|batch| (batch, rx))
     });
 
-    file_stream
-        .for_each_concurrent(args.queue_depth, |path| {
+    batch_stream
+        .for_each_concurrent(args.queue_depth, |file_batch| {
             let semaphore = semaphore.clone();
             let warming_bar = warming_bar.clone();
             let discovery_bar = discovery_bar.clone();
@@ -215,17 +232,21 @@ async fn main() -> Result<()> {
             let args_clone = Arc::clone(&args);
 
             async move {
-                let task_start = Instant::now();
+                let batch_start = Instant::now();
+                let batch_size = file_batch.len();
                 
-                // Log semaphore wait time for concurrency analysis
+                // Acquire semaphore once per batch
                 let acquire_start = Instant::now();
                 let _permit = semaphore.acquire().await.unwrap();
                 let wait_time = acquire_start.elapsed();
                 if wait_time > Duration::from_millis(10) {
-                    debug!("High semaphore wait time: {:?} for {}", wait_time, path.display());
+                    debug!("High semaphore wait time: {:?} for batch of {} files", wait_time, batch_size);
                 }
                 
-                discovery_bar.inc(1);
+                // Process each file in the batch
+                for path in file_batch {
+                    let task_start = Instant::now();
+                    discovery_bar.inc(1);
 
                 let file_open_start = Instant::now();
                 let mut file = match File::open(&path).await {
@@ -354,12 +375,16 @@ async fn main() -> Result<()> {
                           path.display(), warming_duration, file_size);
                 }
 
-                total_bytes_warmed.fetch_add(file_size, Ordering::SeqCst);
-                processed_files.fetch_add(1, Ordering::SeqCst);
-                warming_bar.inc(1);
+                    total_bytes_warmed.fetch_add(file_size, Ordering::SeqCst);
+                    processed_files.fetch_add(1, Ordering::SeqCst);
+                    warming_bar.inc(1);
+                    
+                    let total_task_time = task_start.elapsed();
+                    debug!("Total task time for {}: {:?}", path.display(), total_task_time);
+                }
                 
-                let total_task_time = task_start.elapsed();
-                debug!("Total task time for {}: {:?}", path.display(), total_task_time);
+                let batch_duration = batch_start.elapsed();
+                debug!("Completed batch of {} files in {:?}", batch_size, batch_duration);
             }
         })
         .await;

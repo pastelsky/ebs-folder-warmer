@@ -49,6 +49,7 @@ rust-cache-warmer [OPTIONS] <DIRECTORIES>...
 -   `--ignore-hidden`: Ignore hidden files and directories (files starting with '.').
 -   `--max-file-size <BYTES>`: Skip files larger than this size in bytes (e.g., 1000000000 for 1GB). `0` means no limit.
 -   `--sparse-large-files <BYTES>`: Use sparse reading for files larger than this size. `0` means disabled.
+-   `--batch-size <SIZE>`: Number of files to process per async task batch (default: 1000). Higher values reduce coordination overhead for small files.
 -   `--profile`: Enable profiling. When used, generates a `flamegraph.svg` in the current directory.
 
 ### Profiling
@@ -82,6 +83,23 @@ DEBUG Performance metrics:
 DEBUG   Throughput: 245.67 MB/s
 DEBUG   Files per second: 1247.32
 DEBUG   Concurrency efficiency: 78.4%
+```
+
+### Batch Processing Optimization
+
+For workloads with many small files (like source code repositories), the `--batch-size` parameter can significantly improve performance by reducing async coordination overhead:
+
+- **Small files (< 10KB)**: Use higher batch sizes (1000-5000) for better efficiency
+- **Mixed file sizes**: Default batch size (1000) provides good balance
+- **Large files (> 1MB)**: Lower batch sizes (100-500) prevent memory pressure
+
+Example for source code repositories:
+```sh
+# Optimized for many small files (e.g., JavaScript/TypeScript projects)
+rust-cache-warmer --batch-size 2000 --queue-depth 16 /path/to/source-code
+
+# Balanced for mixed workloads
+rust-cache-warmer --batch-size 1000 --queue-depth 32 /path/to/mixed-content
 ```
 
 ### Examples
