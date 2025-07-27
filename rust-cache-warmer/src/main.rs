@@ -8,7 +8,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, BufReader, AsyncSeekExt};
-use tokio::sync::Semaphore;
 use log::{debug, info};
 use std::time::Instant;
 use tokio::sync::mpsc;
@@ -147,7 +146,7 @@ async fn main() -> Result<()> {
     let args = Arc::new(args);
     
     // Use a channel-based approach for streaming file processing
-    let (tx, mut rx) = mpsc::unbounded_channel::<PathBuf>();
+    let (tx, rx) = mpsc::unbounded_channel::<PathBuf>();
     
     // Spawn file discovery task
     let discovery_args = Arc::clone(&args);
@@ -187,7 +186,6 @@ async fn main() -> Result<()> {
         file_count
     });
 
-    let semaphore = Arc::new(Semaphore::new(args.queue_depth));
     let total_bytes_warmed = Arc::new(AtomicU64::new(0));
     let processed_files = Arc::new(AtomicU64::new(0));
 
@@ -201,15 +199,14 @@ async fn main() -> Result<()> {
 
     file_stream
         .for_each_concurrent(args.queue_depth, |path| {
-            let semaphore = semaphore.clone();
+            // Clone references outside the async block for better performance
             let warming_bar = warming_bar.clone();
             let discovery_bar = discovery_bar.clone();
             let total_bytes_warmed = total_bytes_warmed.clone();
             let processed_files = processed_files.clone();
-            let args_clone = Arc::clone(&args);
+            let args = args.clone();
 
             async move {
-                let _permit = semaphore.acquire().await.unwrap();
                 discovery_bar.inc(1);
 
                 let mut file = match File::open(&path).await {
@@ -232,8 +229,8 @@ async fn main() -> Result<()> {
                     }
                 };
 
-                if args_clone.max_file_size > 0 && file_size > args_clone.max_file_size {
-                    debug!("Skipping large file: {} (size: {} > max: {})", path.display(), file_size, args_clone.max_file_size);
+                if args.max_file_size > 0 && file_size > args.max_file_size {
+                    debug!("Skipping large file: {} (size: {} > max: {})", path.display(), file_size, args.max_file_size);
                     processed_files.fetch_add(1, Ordering::SeqCst);
                     warming_bar.inc(1);
                     return;
@@ -254,7 +251,7 @@ async fn main() -> Result<()> {
                 };
 
                 if !warmed {
-                    if args_clone.sparse_large_files > 0 && file_size > args_clone.sparse_large_files {
+                    if args.sparse_large_files > 0 && file_size > args.sparse_large_files {
                         let page_size: u64 = 4096;
                         let mut offset: u64 = 0;
 
