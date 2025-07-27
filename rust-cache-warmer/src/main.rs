@@ -11,6 +11,7 @@ use tokio::io::{AsyncReadExt, BufReader, AsyncSeekExt};
 use tokio::sync::Semaphore;
 use log::{debug, info};
 use std::time::Instant;
+use tokio::sync::mpsc;
 #[cfg(target_os = "linux")]
 use nix::fcntl::{posix_fadvise, PosixFadviseAdvice};
 #[cfg(target_os = "macos")]
@@ -29,8 +30,8 @@ struct Opts {
     #[clap(
         short,
         long,
-        default_value_t = 128,
-        help = "Number of concurrent files to read at once."
+        default_value_t = 32,
+        help = "Number of concurrent files to read at once. Lower values reduce disk queue pressure."
     )]
     queue_depth: usize,
 
@@ -124,12 +125,9 @@ async fn main() -> Result<()> {
     let total_start = Instant::now();
     debug!("Configuration: {:?}", args);
 
-    debug!("Starting file discovery phase");
-    let discovery_start = Instant::now();
-
     let multi_progress = MultiProgress::new();
     let discovery_style = ProgressStyle::with_template(
-        "{spinner:.green} [{elapsed_precise}] Discovering files: {pos}",
+        "{spinner:.green} [{elapsed_precise}] Processing files: {pos}",
     )
     .unwrap();
 
@@ -137,171 +135,186 @@ async fn main() -> Result<()> {
     discovery_bar.set_style(discovery_style);
     discovery_bar.enable_steady_tick(std::time::Duration::from_millis(100));
 
-    let args = Arc::new(args);
-    let mut file_paths = Vec::new();
-
-    for path in &args.directories {
-        debug!("Walking directory: {}", path.display());
-        let mut walker_builder = WalkBuilder::new(path);
-        let walker = walker_builder
-            .threads(args.threads.unwrap_or_else(num_cpus::get))
-            .follow_links(args.follow_symlinks)
-            .max_depth(args.max_depth)
-            .git_ignore(!args.respect_gitignore)
-            .hidden(args.ignore_hidden)  // Skip hidden if flag is set
-            .build();
-
-        for result in walker {
-            match result {
-                Ok(entry) => {
-                    if entry.file_type().map_or(false, |ft| ft.is_file()) {
-                        file_paths.push(entry.into_path());
-                        discovery_bar.inc(1);
-                    }
-                }
-                Err(err) => {
-                    debug!("Failed to process directory entry: {}", err);
-                }
-            }
-        }
-    }
-    debug!("File discovery phase complete. {} files found.", file_paths.len());
-    discovery_bar.finish_with_message(format!("Discovered {} files", file_paths.len()));
-
-    let discovery_duration = discovery_start.elapsed();
-    if !args.debug {
-        println!("File discovery took {:.2?}", discovery_duration);
-    }
-
     let warming_style = ProgressStyle::with_template(
-        "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] Warming files: {pos}/{len} ({percent}%)",
+        "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] Warmed files: {pos} ({rate}/s)",
     )
     .unwrap()
     .progress_chars("#>-");
 
-    let warming_bar = multi_progress.add(ProgressBar::new(file_paths.len() as u64));
+    let warming_bar = multi_progress.add(ProgressBar::new_spinner());
     warming_bar.set_style(warming_style);
+
+    let args = Arc::new(args);
+    
+    // Use a channel-based approach for streaming file processing
+    let (tx, mut rx) = mpsc::unbounded_channel::<PathBuf>();
+    
+    // Spawn file discovery task
+    let discovery_args = Arc::clone(&args);
+    let discovery_handle = tokio::spawn(async move {
+        let mut file_count = 0u64;
+        
+        for path in &discovery_args.directories {
+            debug!("Walking directory: {}", path.display());
+            let mut walker_builder = WalkBuilder::new(path);
+            let walker = walker_builder
+                .threads(discovery_args.threads.unwrap_or_else(num_cpus::get))
+                .follow_links(discovery_args.follow_symlinks)
+                .max_depth(discovery_args.max_depth)
+                .git_ignore(!discovery_args.respect_gitignore)
+                .hidden(discovery_args.ignore_hidden)
+                .build();
+
+            for result in walker {
+                match result {
+                    Ok(entry) => {
+                        if entry.file_type().map_or(false, |ft| ft.is_file()) {
+                            if tx.send(entry.into_path()).is_err() {
+                                debug!("Receiver dropped, stopping file discovery");
+                                return file_count;
+                            }
+                            file_count += 1;
+                        }
+                    }
+                    Err(err) => {
+                        debug!("Failed to process directory entry: {}", err);
+                    }
+                }
+            }
+        }
+        
+        debug!("File discovery complete. {} files found.", file_count);
+        file_count
+    });
 
     let semaphore = Arc::new(Semaphore::new(args.queue_depth));
     let total_bytes_warmed = Arc::new(AtomicU64::new(0));
+    let processed_files = Arc::new(AtomicU64::new(0));
 
-    debug!("Starting file warming phase");
+    debug!("Starting concurrent file warming");
     let warming_start = Instant::now();
 
-    let mut tasks = Vec::new();
-    for path in file_paths {
-        let semaphore = semaphore.clone();
-        let warming_bar = warming_bar.clone();
-        let total_bytes_warmed = total_bytes_warmed.clone();
-        let args_clone = Arc::clone(&args);
+    // Process files as they're discovered using a stream with controlled concurrency
+    let file_stream = stream::unfold(rx, |mut rx| async move {
+        rx.recv().await.map(|path| (path, rx))
+    });
 
-        let task = tokio::spawn(async move {
-            let _permit = semaphore.acquire().await.unwrap();
+    file_stream
+        .for_each_concurrent(args.queue_depth, |path| {
+            let semaphore = semaphore.clone();
+            let warming_bar = warming_bar.clone();
+            let discovery_bar = discovery_bar.clone();
+            let total_bytes_warmed = total_bytes_warmed.clone();
+            let processed_files = processed_files.clone();
+            let args_clone = Arc::clone(&args);
 
-            let mut file = match File::open(&path).await {
-                Ok(f) => f,
-                Err(e) => {
-                    debug!("Failed to open file {}: {}", path.display(), e);
+            async move {
+                let _permit = semaphore.acquire().await.unwrap();
+                discovery_bar.inc(1);
+
+                let mut file = match File::open(&path).await {
+                    Ok(f) => f,
+                    Err(e) => {
+                        debug!("Failed to open file {}: {}", path.display(), e);
+                        processed_files.fetch_add(1, Ordering::SeqCst);
+                        warming_bar.inc(1);
+                        return;
+                    }
+                };
+
+                let file_size = match file.metadata().await {
+                    Ok(metadata) => metadata.len(),
+                    Err(e) => {
+                        debug!("Failed to get metadata for {}: {}", path.display(), e);
+                        processed_files.fetch_add(1, Ordering::SeqCst);
+                        warming_bar.inc(1);
+                        return;
+                    }
+                };
+
+                if args_clone.max_file_size > 0 && file_size > args_clone.max_file_size {
+                    debug!("Skipping large file: {} (size: {} > max: {})", path.display(), file_size, args_clone.max_file_size);
+                    processed_files.fetch_add(1, Ordering::SeqCst);
+                    warming_bar.inc(1);
                     return;
                 }
-            };
 
-            let file_size = match file.metadata().await {
-                Ok(metadata) => metadata.len(),
-                Err(e) => {
-                    debug!("Failed to get metadata for {}: {}", path.display(), e);
-                    return;
-                }
-            };
+                let warmed = if cfg!(target_os = "linux") {
+                    #[cfg(target_os = "linux")]
+                    { warm_with_fadvise(&file, file_size) }
+                    #[cfg(not(target_os = "linux"))]
+                    { false }
+                } else if cfg!(target_os = "macos") {
+                    #[cfg(target_os = "macos")]
+                    { warm_with_madvise(&file, file_size) }
+                    #[cfg(not(target_os = "macos"))]
+                    { false }
+                } else {
+                    false
+                };
 
-            if args_clone.max_file_size > 0 && file_size > args_clone.max_file_size {
-                debug!("Skipping large file: {} (size: {} > max: {})", path.display(), file_size, args_clone.max_file_size);
-                warming_bar.inc(1);
-                return;
-            }
+                if !warmed {
+                    if args_clone.sparse_large_files > 0 && file_size > args_clone.sparse_large_files {
+                        let page_size: u64 = 4096;
+                        let mut offset: u64 = 0;
 
-            let warmed = if cfg!(target_os = "linux") {
-                #[cfg(target_os = "linux")]
-                { warm_with_fadvise(&file, file_size) }
-                #[cfg(not(target_os = "linux"))]
-                { false }
-            } else if cfg!(target_os = "macos") {
-                #[cfg(target_os = "macos")]
-                { warm_with_madvise(&file, file_size) }
-                #[cfg(not(target_os = "macos"))]
-                { false }
-            } else {
-                false
-            };
-
-            if warmed {
-
-            } else {
-                if args_clone.sparse_large_files > 0 && file_size > args_clone.sparse_large_files {
-                    let page_size: u64 = 4096;
-                    let mut offset: u64 = 0;
-
-                    while offset < file_size {
-                        if let Err(e) = file.seek(std::io::SeekFrom::Start(offset)).await {
-                            debug!("Failed to seek in file {} at offset {}: {}", path.display(), offset, e);
-                            break;
-                        }
-                        let mut byte = [0; 1];
-                        match file.read(&mut byte).await {
-                            Ok(n) => {
-                                if n == 0 {
+                        while offset < file_size {
+                            if let Err(e) = file.seek(std::io::SeekFrom::Start(offset)).await {
+                                debug!("Failed to seek in file {} at offset {}: {}", path.display(), offset, e);
+                                break;
+                            }
+                            let mut byte = [0; 1];
+                            match file.read(&mut byte).await {
+                                Ok(n) => {
+                                    if n == 0 {
+                                        break;
+                                    }
+                                }
+                                Err(e) => {
+                                    debug!("Failed to read byte in file {} at offset {}: {}", path.display(), offset, e);
                                     break;
                                 }
                             }
-                            Err(e) => {
-                                debug!("Failed to read byte in file {} at offset {}: {}", path.display(), offset, e);
-                                break;
-                            }
+                            offset += page_size;
                         }
-                        offset += page_size;
-                    }
+                    } else {
+                        let mut reader = BufReader::new(file);
+                        let mut buffer = [0; 8192];
 
-                } else {
-                    let mut reader = BufReader::new(file);
-                    let mut buffer = [0; 8192];
-
-                    loop {
-                        match reader.read(&mut buffer).await {
-                            Ok(0) => break,
-                            Ok(n) => {
-                            },
-                            Err(e) => {
-                                debug!("Failed to read file {}: {}", path.display(), e);
-                                break;
+                        loop {
+                            match reader.read(&mut buffer).await {
+                                Ok(0) => break,
+                                Ok(_n) => {},
+                                Err(e) => {
+                                    debug!("Failed to read file {}: {}", path.display(), e);
+                                    break;
+                                }
                             }
                         }
                     }
                 }
-            }
 
-            total_bytes_warmed.fetch_add(file_size, Ordering::SeqCst);
-            warming_bar.inc(1);
-        });
-        tasks.push(task);
-    }
-    
-    stream::iter(tasks)
-        .for_each_concurrent(None, |task| async {
-            let _ = task.await;
+                total_bytes_warmed.fetch_add(file_size, Ordering::SeqCst);
+                processed_files.fetch_add(1, Ordering::SeqCst);
+                warming_bar.inc(1);
+            }
         })
         .await;
 
+    // Wait for discovery to complete and get final count
+    let total_files_discovered = discovery_handle.await.unwrap();
+    
     debug!("File warming phase complete");
     let warming_duration = warming_start.elapsed();
-    if !args.debug {
-        println!("File warming took {:.2?}", warming_duration);
-    }
-
-    warming_bar.finish_with_message("Done");
+    
+    discovery_bar.finish_with_message(format!("Discovered {} files", total_files_discovered));
+    warming_bar.finish_with_message(format!("Warmed {} files", processed_files.load(Ordering::SeqCst)));
     multi_progress.clear().unwrap();
+    
     info!(
-        "Cache warming complete. Warmed {} bytes in {:.2?}.",
+        "Cache warming complete. Warmed {} bytes across {} files in {:.2?}.",
         total_bytes_warmed.load(Ordering::SeqCst),
+        processed_files.load(Ordering::SeqCst),
         warming_duration
     );
     
