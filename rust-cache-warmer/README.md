@@ -45,7 +45,7 @@ rust-cache-warmer [OPTIONS] <DIRECTORIES>...
 -   `--follow-symlinks`: Follow symbolic links.
 -   `--respect-gitignore`: Respect `.gitignore` and other ignore files.
 -   `--max-depth <DEPTH>`: Maximum directory traversal depth.
--   `--debug`: Enable detailed debug logging.
+-   `--debug`: Enable detailed debug logging with comprehensive performance metrics.
 -   `--ignore-hidden`: Ignore hidden files and directories (files starting with '.').
 -   `--max-file-size <BYTES>`: Skip files larger than this size in bytes (e.g., 1000000000 for 1GB). `0` means no limit.
 -   `--sparse-large-files <BYTES>`: Use sparse reading for files larger than this size. `0` means disabled.
@@ -60,6 +60,29 @@ To generate a useful performance flamegraph, you must use the `profiling` binary
 ./rust-cache-warmer-linux-amd64-profiling --profile /path/to/your/data
 ```
 This will create a `flamegraph.svg` file that you can open in a web browser to analyze the application's performance.
+
+### Debug Logging & Performance Analysis
+
+The `--debug` flag enables comprehensive performance monitoring and logging:
+
+- **Per-file timing**: File open, metadata fetch, and warming operation times
+- **Concurrency analysis**: Semaphore wait times and queue efficiency metrics
+- **I/O method tracking**: Which warming method is used (fadvise/madvise/fallback)
+- **File size distribution**: Categorizes files as tiny/small/medium/large/huge
+- **Throughput metrics**: MB/s, files/s, and concurrency efficiency percentages
+- **Performance warnings**: Identifies slow operations for investigation
+
+Example debug output:
+```
+DEBUG Processing medium file: /path/to/file.txt (65536 bytes)
+DEBUG File open took 2.1ms for /path/to/file.txt
+DEBUG fadvise operation took 0.3ms, success: true
+DEBUG File /path/to/file.txt warming completed: method=linux_fadvise, duration=0.8ms, size=65536
+DEBUG Performance metrics:
+DEBUG   Throughput: 245.67 MB/s
+DEBUG   Files per second: 1247.32
+DEBUG   Concurrency efficiency: 78.4%
+```
 
 ### Examples
 
