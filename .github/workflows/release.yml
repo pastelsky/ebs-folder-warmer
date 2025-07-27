@@ -19,14 +19,20 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Build binary
+      - name: Build standard release binary
         run: cargo build --release --manifest-path rust-cache-warmer/Cargo.toml
 
-      - name: Rename binary for release asset
-        run: mv rust-cache-warmer/target/release/rust-cache-warmer rust-cache-warmer-linux-amd64
+      - name: Build release binary with debug symbols
+        run: cargo build --profile profiling --manifest-path rust-cache-warmer/Cargo.toml
 
-      - name: Create GitHub Release and upload binary
+      - name: Rename binaries for release assets
+        run: |
+          mv rust-cache-warmer/target/release/rust-cache-warmer rust-cache-warmer-linux-amd64
+          mv rust-cache-warmer/target/profiling/rust-cache-warmer rust-cache-warmer-linux-amd64-profiling
+
+      - name: Create GitHub Release and upload binaries
         uses: softprops/action-gh-release@v1
         with:
-          # This will upload the file created in the previous step.
-          files: rust-cache-warmer-linux-amd64 
+          files: |
+            rust-cache-warmer-linux-amd64
+            rust-cache-warmer-linux-amd64-profiling 
