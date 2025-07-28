@@ -19,7 +19,6 @@ libc = "0.2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 tokio-uring = "0.5"
-rio = "0.9"
 
 # For profiling builds, which require debug symbols.
 # Build with `cargo build --profile profiling`

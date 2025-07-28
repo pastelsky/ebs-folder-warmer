@@ -3,8 +3,6 @@ use std::time::Instant;
 use log::debug;
 
 #[cfg(target_os = "linux")]
-use rio::Rio;
-#[cfg(target_os = "linux")]
 use libc;
 
 use crate::warming::{WarmingResult, WarmingOptions};
@@ -22,7 +20,6 @@ pub async fn warm_file(
         warm_with_libaio_direct(path, file_size, options.sparse_large_files).await
     } else {
         // For now, if not using direct I/O, fall back to standard approach
-        // Could implement buffered libaio in the future
         debug!("libaio without direct I/O not yet implemented, falling back");
         Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
@@ -39,7 +36,7 @@ async fn warm_with_libaio_direct(
 ) -> Result<WarmingResult, std::io::Error> {
     let start = Instant::now();
     
-    // Open file with O_DIRECT first
+    // Open file with O_DIRECT
     let fd = unsafe {
         libc::open(
             std::ffi::CString::new(path.to_string_lossy().as_ref()).unwrap().as_ptr(),
@@ -52,32 +49,18 @@ async fn warm_with_libaio_direct(
         return Err(std::io::Error::last_os_error());
     }
     
-    // Check if libaio (rio) is available by trying to create a Rio instance
-    match Rio::new() {
-        Ok(rio) => {
-            let result = if sparse_large_files > 0 && file_size > sparse_large_files {
-                warm_sparse_libaio_direct(&rio, fd, file_size).await
-            } else {
-                warm_full_libaio_direct(&rio, fd).await
-            };
-            
-            unsafe { libc::close(fd) };
-            result
-        }
-        Err(_) => {
-            unsafe { libc::close(fd) };
-            // libaio not available
-            Err(std::io::Error::new(
-                std::io::ErrorKind::Unsupported,
-                "libaio not available on this system"
-            ))
-        }
-    }
+    let result = if sparse_large_files > 0 && file_size > sparse_large_files {
+        warm_sparse_libaio_direct(fd, file_size).await
+    } else {
+        warm_full_libaio_direct(fd).await
+    };
+    
+    unsafe { libc::close(fd) };
+    result
 }
 
 #[cfg(target_os = "linux")]
 async fn warm_sparse_libaio_direct(
-    rio: &Rio,
     fd: libc::c_int,
     file_size: u64,
 ) -> Result<WarmingResult, std::io::Error> {
@@ -97,9 +80,7 @@ async fn warm_sparse_libaio_direct(
     
     let mut offset = 0;
     while offset < file_size {
-        let buffer_slice = unsafe { std::slice::from_raw_parts_mut(buffer, block_size as usize) };
-        
-        // Use blocking read since Rio doesn't have an async interface 
+        // Use pread for aligned direct I/O reads
         let result = unsafe {
             libc::pread(fd, buffer.cast(), block_size as usize, offset as libc::off_t)
         };
@@ -130,7 +111,6 @@ async fn warm_sparse_libaio_direct(
 
 #[cfg(target_os = "linux")]
 async fn warm_full_libaio_direct(
-    rio: &Rio,
     fd: libc::c_int,
 ) -> Result<WarmingResult, std::io::Error> {
     let start = Instant::now();
@@ -148,7 +128,7 @@ async fn warm_full_libaio_direct(
     }
     
     loop {
-        // Use blocking read since Rio doesn't have a simple async interface 
+        // Use pread for aligned direct I/O reads
         let result = unsafe {
             libc::pread(fd, buffer.cast(), block_size, offset as libc::off_t)
         };
