@@ -3,7 +3,7 @@ use std::time::Instant;
 use log::debug;
 
 #[cfg(target_os = "linux")]
-use rio::{Rio, Completion};
+use rio::Rio;
 #[cfg(target_os = "linux")]
 use libc;
 
@@ -39,35 +39,7 @@ async fn warm_with_libaio_direct(
 ) -> Result<WarmingResult, std::io::Error> {
     let start = Instant::now();
     
-    // Check if libaio (rio) is available by trying to create a Rio instance
-    match Rio::new() {
-        Ok(rio) => {
-            // Use sparse reading for large files
-            if sparse_large_files > 0 && file_size > sparse_large_files {
-                warm_sparse_libaio_direct(&rio, path, file_size).await
-            } else {
-                warm_full_libaio_direct(&rio, path).await
-            }
-        }
-        Err(_) => {
-            // libaio not available
-            Err(std::io::Error::new(
-                std::io::ErrorKind::Unsupported,
-                "libaio not available on this system"
-            ))
-        }
-    }
-}
-
-#[cfg(target_os = "linux")]
-async fn warm_sparse_libaio_direct(
-    rio: &Rio,
-    path: &PathBuf,
-    file_size: u64,
-) -> Result<WarmingResult, std::io::Error> {
-    let start = Instant::now();
-    
-    // Open file with O_DIRECT
+    // Open file with O_DIRECT first
     let fd = unsafe {
         libc::open(
             std::ffi::CString::new(path.to_string_lossy().as_ref()).unwrap().as_ptr(),
@@ -80,6 +52,37 @@ async fn warm_sparse_libaio_direct(
         return Err(std::io::Error::last_os_error());
     }
     
+    // Check if libaio (rio) is available by trying to create a Rio instance
+    match Rio::new() {
+        Ok(rio) => {
+            let result = if sparse_large_files > 0 && file_size > sparse_large_files {
+                warm_sparse_libaio_direct(&rio, fd, file_size).await
+            } else {
+                warm_full_libaio_direct(&rio, fd).await
+            };
+            
+            unsafe { libc::close(fd) };
+            result
+        }
+        Err(_) => {
+            unsafe { libc::close(fd) };
+            // libaio not available
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "libaio not available on this system"
+            ))
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn warm_sparse_libaio_direct(
+    rio: &Rio,
+    fd: libc::c_int,
+    file_size: u64,
+) -> Result<WarmingResult, std::io::Error> {
+    let start = Instant::now();
+    
     let block_size = 4096u64; // Standard block size
     let stride = 65536u64; // Read every 64KB
     let mut bytes_read = 0u64;
@@ -89,7 +92,6 @@ async fn warm_sparse_libaio_direct(
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, "Failed to create aligned memory layout"))?;
     let buffer = unsafe { std::alloc::alloc(layout) };
     if buffer.is_null() {
-        unsafe { libc::close(fd) };
         return Err(std::io::Error::new(std::io::ErrorKind::OutOfMemory, "Failed to allocate aligned buffer"));
     }
     
@@ -97,15 +99,18 @@ async fn warm_sparse_libaio_direct(
     while offset < file_size {
         let buffer_slice = unsafe { std::slice::from_raw_parts_mut(buffer, block_size as usize) };
         
-        match rio.read_at(&fd, buffer_slice, offset).await {
-            Ok(n) if n > 0 => {
-                bytes_read += n as u64;
-            }
-            Ok(_) => break, // EOF
-            Err(e) => {
-                debug!("libaio read error at offset {}: {}", offset, e);
-                // Continue with next block on error
-            }
+        // Use blocking read since Rio doesn't have an async interface 
+        let result = unsafe {
+            libc::pread(fd, buffer.cast(), block_size as usize, offset as libc::off_t)
+        };
+        
+        if result > 0 {
+            bytes_read += result as u64;
+        } else if result == 0 {
+            break; // EOF
+        } else {
+            debug!("read error at offset {}: {}", offset, std::io::Error::last_os_error());
+            // Continue with next block on error
         }
         
         offset += stride;
@@ -113,7 +118,6 @@ async fn warm_sparse_libaio_direct(
     
     unsafe { 
         std::alloc::dealloc(buffer, layout);
-        libc::close(fd);
     }
     
     debug!("Sparse libaio + direct I/O completed: {} bytes read in {:?}", bytes_read, start.elapsed());
@@ -127,22 +131,9 @@ async fn warm_sparse_libaio_direct(
 #[cfg(target_os = "linux")]
 async fn warm_full_libaio_direct(
     rio: &Rio,
-    path: &PathBuf,
+    fd: libc::c_int,
 ) -> Result<WarmingResult, std::io::Error> {
     let start = Instant::now();
-    
-    // Open file with O_DIRECT
-    let fd = unsafe {
-        libc::open(
-            std::ffi::CString::new(path.to_string_lossy().as_ref()).unwrap().as_ptr(),
-            libc::O_RDONLY | libc::O_DIRECT,
-            0,
-        )
-    };
-    
-    if fd < 0 {
-        return Err(std::io::Error::last_os_error());
-    }
     
     let block_size = 65536; // 64KB blocks for efficient reading
     let mut total_bytes_read = 0u64;
@@ -153,32 +144,30 @@ async fn warm_full_libaio_direct(
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, "Failed to create aligned memory layout"))?;
     let buffer = unsafe { std::alloc::alloc(layout) };
     if buffer.is_null() {
-        unsafe { libc::close(fd) };
         return Err(std::io::Error::new(std::io::ErrorKind::OutOfMemory, "Failed to allocate aligned buffer"));
     }
     
     loop {
-        let buffer_slice = unsafe { std::slice::from_raw_parts_mut(buffer, block_size) };
+        // Use blocking read since Rio doesn't have a simple async interface 
+        let result = unsafe {
+            libc::pread(fd, buffer.cast(), block_size, offset as libc::off_t)
+        };
         
-        match rio.read_at(&fd, buffer_slice, offset as u64).await {
-            Ok(n) if n > 0 => {
-                total_bytes_read += n as u64;
-                offset += n;
+        if result > 0 {
+            total_bytes_read += result as u64;
+            offset += result;
+        } else if result == 0 {
+            break; // EOF
+        } else {
+            unsafe { 
+                std::alloc::dealloc(buffer, layout);
             }
-            Ok(_) => break, // EOF
-            Err(e) => {
-                unsafe { 
-                    std::alloc::dealloc(buffer, layout);
-                    libc::close(fd);
-                }
-                return Err(e);
-            }
+            return Err(std::io::Error::last_os_error());
         }
     }
     
     unsafe { 
         std::alloc::dealloc(buffer, layout);
-        libc::close(fd);
     }
     
     debug!("Full libaio + direct I/O completed: {} bytes read in {:?}", total_bytes_read, start.elapsed());

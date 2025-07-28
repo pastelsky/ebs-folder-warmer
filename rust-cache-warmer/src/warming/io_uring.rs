@@ -4,8 +4,6 @@ use log::debug;
 
 #[cfg(target_os = "linux")]
 use tokio_uring::fs::File as UringFile;
-#[cfg(target_os = "linux")]
-use libc;
 
 use crate::warming::{WarmingResult, WarmingOptions};
 
@@ -37,8 +35,6 @@ async fn warm_with_io_uring_direct(
     file_size: u64,
     sparse_large_files: u64,
 ) -> Result<WarmingResult, std::io::Error> {
-    let start = Instant::now();
-    
     // Use sparse reading for large files
     if sparse_large_files > 0 && file_size > sparse_large_files {
         warm_sparse_io_uring_direct(path, file_size).await
@@ -55,52 +51,47 @@ async fn warm_sparse_io_uring_direct(
     let start = Instant::now();
     
     // Check if tokio-uring runtime is available
-    match tokio_uring::start() {
-        Ok(runtime) => {
-            let result = runtime.block_on(async {
-                // Open with O_DIRECT for true EBS warming
-                let file = match UringFile::open(path).await {
-                    Ok(f) => f,
-                    Err(e) => return Err(e),
-                };
-                
-                let block_size = 4096u64; // Standard block size
-                let stride = 65536u64; // Read every 64KB
-                let mut bytes_read = 0u64;
-                let mut buf = vec![0u8; block_size as usize];
-                
-                let mut offset = 0;
-                while offset < file_size {
-                    match file.read_at(&mut buf, offset).await {
-                        Ok((_, n)) if n > 0 => {
-                            bytes_read += n as u64;
-                        }
-                        Ok(_) => break, // EOF
-                        Err(e) => {
-                            debug!("io_uring read error at offset {}: {}", offset, e);
-                            // Continue with next block on error
-                        }
-                    }
-                    
-                    offset += stride;
+    let result = tokio_uring::start(async {
+        // Open with O_DIRECT for true EBS warming
+        let file = match UringFile::open(path).await {
+            Ok(f) => f,
+            Err(e) => return Err(e),
+        };
+        
+        let block_size = 4096usize; // Standard block size
+        let stride = 65536u64; // Read every 64KB
+        let mut bytes_read = 0u64;
+        
+        let mut offset = 0;
+        while offset < file_size {
+            let buf = vec![0u8; block_size];
+            match file.read_at(buf, offset).await {
+                (Ok(n), _buf) if n > 0 => {
+                    bytes_read += n as u64;
                 }
-                
-                Ok(bytes_read)
-            });
-            
-            match result {
-                Ok(bytes_read) => {
-                    debug!("Sparse io_uring + direct I/O completed: {} bytes read in {:?}", bytes_read, start.elapsed());
-                    Ok(WarmingResult {
-                        method: "io_uring_direct_sparse",
-                        success: true,
-                        duration: start.elapsed(),
-                    })
+                (Ok(_), _buf) => break, // EOF
+                (Err(e), _buf) => {
+                    debug!("io_uring read error at offset {}: {}", offset, e);
+                    // Continue with next block on error
                 }
-                Err(e) => Err(e),
             }
+            
+            offset += stride;
         }
-        Err(_) => {
+        
+        Ok(bytes_read)
+    });
+    
+    match result {
+        Ok(bytes_read) => {
+            debug!("Sparse io_uring + direct I/O completed: {} bytes read in {:?}", bytes_read, start.elapsed());
+            Ok(WarmingResult {
+                method: "io_uring_direct_sparse",
+                success: true,
+                duration: start.elapsed(),
+            })
+        }
+        Err(e) => {
             // io_uring runtime not available
             Err(std::io::Error::new(
                 std::io::ErrorKind::Unsupported,
@@ -117,47 +108,42 @@ async fn warm_full_io_uring_direct(
     let start = Instant::now();
     
     // Check if tokio-uring runtime is available
-    match tokio_uring::start() {
-        Ok(runtime) => {
-            let result = runtime.block_on(async {
-                // Open with O_DIRECT for true EBS warming
-                let file = match UringFile::open(path).await {
-                    Ok(f) => f,
-                    Err(e) => return Err(e),
-                };
-                
-                let block_size = 65536; // 64KB blocks for efficient reading
-                let mut buf = vec![0u8; block_size];
-                let mut total_bytes_read = 0u64;
-                let mut offset = 0;
-                
-                loop {
-                    match file.read_at(&mut buf, offset as u64).await {
-                        Ok((_, n)) if n > 0 => {
-                            total_bytes_read += n as u64;
-                            offset += n;
-                        }
-                        Ok(_) => break, // EOF
-                        Err(e) => return Err(e),
-                    }
+    let result = tokio_uring::start(async {
+        // Open with O_DIRECT for true EBS warming
+        let file = match UringFile::open(path).await {
+            Ok(f) => f,
+            Err(e) => return Err(e),
+        };
+        
+        let block_size = 65536; // 64KB blocks for efficient reading
+        let mut total_bytes_read = 0u64;
+        let mut offset = 0;
+        
+        loop {
+            let buf = vec![0u8; block_size];
+            match file.read_at(buf, offset as u64).await {
+                (Ok(n), _buf) if n > 0 => {
+                    total_bytes_read += n as u64;
+                    offset += n;
                 }
-                
-                Ok(total_bytes_read)
-            });
-            
-            match result {
-                Ok(bytes_read) => {
-                    debug!("Full io_uring + direct I/O completed: {} bytes read in {:?}", bytes_read, start.elapsed());
-                    Ok(WarmingResult {
-                        method: "io_uring_direct_full",
-                        success: true,
-                        duration: start.elapsed(),
-                    })
-                }
-                Err(e) => Err(e),
+                (Ok(_), _buf) => break, // EOF
+                (Err(e), _buf) => return Err(e),
             }
         }
-        Err(_) => {
+        
+        Ok(total_bytes_read)
+    });
+    
+    match result {
+        Ok(bytes_read) => {
+            debug!("Full io_uring + direct I/O completed: {} bytes read in {:?}", bytes_read, start.elapsed());
+            Ok(WarmingResult {
+                method: "io_uring_direct_full",
+                success: true,
+                duration: start.elapsed(),
+            })
+        }
+        Err(e) => {
             // io_uring runtime not available
             Err(std::io::Error::new(
                 std::io::ErrorKind::Unsupported,
