@@ -5,6 +5,7 @@ High-performance, concurrent file cache warmer for EBS volumes. Designed to effi
 ## Features
 
 - **Multiple I/O Strategies**: io_uring, libaio, OS hints (fadvise/madvise), Tokio async
+- **Runtime Strategy Detection**: Automatically detects available features and falls back gracefully
 - **Direct I/O Support**: Bypass OS page cache for pure EBS warming 
 - **Sparse Reading**: Efficient sampling for large files
 - **High Concurrency**: Configurable queue depths (32-512+ operations)
@@ -16,27 +17,18 @@ High-performance, concurrent file cache warmer for EBS volumes. Designed to effi
 # Standard usage (OS hints + fallbacks)
 ./rust-cache-warmer /path/to/files
 
-# High performance (Linux only)
+# High performance (automatically detects availability)
 ./rust-cache-warmer --libaio --direct-io --queue-depth 256 /path/to/files
 
-# Maximum performance (Linux 5.1+ only)  
+# Maximum performance (automatically detects availability)  
 ./rust-cache-warmer --io-uring --direct-io --queue-depth 512 /path/to/files
 ```
 
-## Build Options
+## Build
 
 ```bash
-# Standard build (OS hints + Tokio)
+# Single build includes all features with runtime detection
 cargo build --release
-
-# With Linux AIO support
-cargo build --release --features "libaio"
-
-# With io_uring support (Linux 5.1+)
-cargo build --release --features "io_uring"
-
-# All features
-cargo build --release --features "io_uring,libaio"
 ```
 
 ## Performance
@@ -48,6 +40,8 @@ cargo build --release --features "io_uring,libaio"
 | libaio | 256 | 3x | Linux 2.6+ |
 | io_uring | 512+ | 5x | Linux 5.1+ |
 
+*Note: The binary automatically detects available features and falls back gracefully.*
+
 ## CLI Options
 
 ```bash
@@ -57,11 +51,22 @@ Options:
       --sparse-large-files <SIZE>     Use sparse reading for files > SIZE bytes
       --max-file-size <SIZE>          Skip files larger than SIZE bytes
       --direct-io                     Use O_DIRECT (bypass OS cache)
-      --libaio                        Use Linux AIO for high performance
-      --io-uring                      Use io_uring for maximum performance
+      --libaio                        Request Linux AIO for high performance
+      --io-uring                      Request io_uring for maximum performance
       --debug                         Detailed debug output
       --profile                       Generate flamegraph.svg profiling
 ```
+
+## Strategy Selection
+
+The warmer automatically selects the best available strategy:
+
+1. **io_uring** (if requested and available) - Maximum performance on modern Linux
+2. **libaio** (if requested and available) - High performance on Linux 
+3. **OS hints** (fadvise/madvise) - Efficient on all platforms
+4. **Tokio async** - Universal fallback
+
+Strategy detection happens at startup and displays which features are available.
 
 ## Warming Strategy
 
