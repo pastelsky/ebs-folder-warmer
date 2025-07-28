@@ -1,5 +1,0 @@
-# Rust build artifacts
-/target
-
-# Ignore the lock file to avoid version conflicts between different environments
-Cargo.lock 

@@ -1,45 +1,5 @@
-# Build artifacts
-disk-warmer/disk-warmer
-disk-warmer/disk-warmer-*
-disk-warmer/warmer
-*.o
-*.a
-*.so
+# Rust build artifacts
+/target
 
-# Static analysis reports
-disk-warmer/cppcheck-report.xml
-disk-warmer/flawfinder-report.html
-disk-warmer/scan-build-results/
-disk-warmer/plist/
-
-# Package artifacts
-package/
-*.tar.gz
-*.zip
-*.deb
-*.rpm
-
-# Temporary files
-*.tmp
-*.log
-.DS_Store
-
-# IDE files
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-
-# OS files
-Thumbs.db
-
-# Build dependencies (downloaded during CI)
-disk-warmer/*.deb
-
-# Benchmark results and test data
-bench/results/
-bench/test-data/
-*.json
-*.fio.tmp
-comparison_results.md
+# Ignore the lock file to avoid version conflicts between different environments
+Cargo.lock
