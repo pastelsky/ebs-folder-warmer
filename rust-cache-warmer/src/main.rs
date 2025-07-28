@@ -6,18 +6,12 @@ use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use tokio::fs::File;
-use tokio::io::{AsyncReadExt, BufReader, AsyncSeekExt};
-use tokio::sync::Semaphore;
 use log::{debug, info, warn};
 use std::time::{Instant, Duration};
-use tokio::sync::mpsc;
-#[cfg(target_os = "linux")]
-use nix::fcntl::{posix_fadvise, PosixFadviseAdvice};
-#[cfg(target_os = "macos")]
-use nix::sys::mman::{madvise, MmapAdvise};
-use std::os::unix::prelude::AsRawFd;
-use std::ptr::NonNull;
+use tokio::sync::{Semaphore, mpsc};
+
+mod warming;
+use warming::{WarmingOptions, warm_file};
 
 #[derive(Parser, Debug)]
 #[clap(
@@ -82,31 +76,15 @@ struct Opts {
 
     #[clap(long, default_value = "1000", help = "Number of files to process per async task batch. Higher values reduce coordination overhead for small files.")]
     batch_size: usize,
-}
 
-#[cfg(target_os = "linux")]
-fn warm_with_fadvise(file: &File, file_size: u64) -> bool {
-    let start = Instant::now();
-    let fd = file.as_raw_fd();
-    let result = posix_fadvise(fd, 0, file_size as i64, PosixFadviseAdvice::POSIX_FADV_WILLNEED).is_ok();
-    debug!("fadvise operation took {:?}, success: {}", start.elapsed(), result);
-    result
-}
-#[cfg(target_os = "macos")]
-fn warm_with_madvise(file: &File, file_size: u64) -> bool {
-    let start = Instant::now();
-    let fd = file.as_raw_fd();
-    let ptr = unsafe { nix::libc::mmap(std::ptr::null_mut(), file_size as usize, nix::libc::PROT_NONE, nix::libc::MAP_SHARED, fd, 0) };
-    if ptr != nix::libc::MAP_FAILED {
-        let nn_ptr = NonNull::new(ptr).expect("mmap returned non-null but failed to create NonNull");
-        let res = unsafe { madvise(nn_ptr, file_size as usize, MmapAdvise::MADV_WILLNEED) };
-        unsafe { nix::libc::munmap(ptr, file_size as usize) };
-        debug!("madvise operation took {:?}, success: {}", start.elapsed(), res.is_ok());
-        res.is_ok()
-    } else {
-        debug!("mmap failed for madvise operation");
-        false
-    }
+    #[clap(long, help = "Use direct I/O (O_DIRECT) to bypass OS page cache. Ideal for EBS warming from S3 where you don't want data cached in memory.")]
+    direct_io: bool,
+
+    #[clap(long, help = "Use io_uring for high-performance async I/O (requires Linux 5.1+ and container support). Can achieve much higher queue depths than regular async I/O.")]
+    io_uring: bool,
+
+    #[clap(long, help = "Use Linux AIO (libaio) for high-performance async I/O. More widely supported than io_uring but slightly lower performance.")]
+    libaio: bool,
 }
 
 #[tokio::main]
@@ -154,6 +132,14 @@ async fn main() -> Result<()> {
     warming_bar.set_style(warming_style);
 
     let args = Arc::new(args);
+    
+    // Convert CLI options to WarmingOptions
+    let warming_options = WarmingOptions {
+        use_io_uring: args.io_uring,
+        use_libaio: args.libaio,
+        use_direct_io: args.direct_io,
+        sparse_large_files: args.sparse_large_files,
+    };
     
     // Use a channel-based approach for batch file processing
     let (tx, rx) = mpsc::unbounded_channel::<Vec<PathBuf>>();
@@ -230,6 +216,7 @@ async fn main() -> Result<()> {
             let total_bytes_warmed = total_bytes_warmed.clone();
             let processed_files = processed_files.clone();
             let args_clone = Arc::clone(&args);
+            let warming_options = warming_options.clone();
 
             async move {
                 let batch_start = Instant::now();
@@ -248,132 +235,51 @@ async fn main() -> Result<()> {
                     let task_start = Instant::now();
                     discovery_bar.inc(1);
 
-                let file_open_start = Instant::now();
-                let mut file = match File::open(&path).await {
-                    Ok(f) => f,
-                    Err(e) => {
-                        debug!("Failed to open file {}: {}", path.display(), e);
+                    // Get file metadata
+                    let file_size = match tokio::fs::metadata(&path).await {
+                        Ok(metadata) => metadata.len(),
+                        Err(e) => {
+                            debug!("Failed to get metadata for {}: {}", path.display(), e);
+                            processed_files.fetch_add(1, Ordering::SeqCst);
+                            warming_bar.inc(1);
+                            continue;
+                        }
+                    };
+
+                    // Log file size category for distribution analysis
+                    let size_category = match file_size {
+                        0..=4096 => "tiny",
+                        4097..=65536 => "small", 
+                        65537..=1048576 => "medium",
+                        1048577..=104857600 => "large",
+                        _ => "huge"
+                    };
+                    debug!("Processing {} file: {} ({} bytes)", size_category, path.display(), file_size);
+
+                    if args_clone.max_file_size > 0 && file_size > args_clone.max_file_size {
+                        debug!("Skipping large file: {} (size: {} > max: {})", path.display(), file_size, args_clone.max_file_size);
                         processed_files.fetch_add(1, Ordering::SeqCst);
                         warming_bar.inc(1);
-                        return;
+                        continue;
                     }
-                };
-                debug!("File open took {:?} for {}", file_open_start.elapsed(), path.display());
 
-                let metadata_start = Instant::now();
-                let file_size = match file.metadata().await {
-                    Ok(metadata) => metadata.len(),
-                    Err(e) => {
-                        debug!("Failed to get metadata for {}: {}", path.display(), e);
-                        processed_files.fetch_add(1, Ordering::SeqCst);
-                        warming_bar.inc(1);
-                        return;
-                    }
-                };
-                debug!("Metadata fetch took {:?} for {}", metadata_start.elapsed(), path.display());
-
-                // Log file size category for distribution analysis
-                let size_category = match file_size {
-                    0..=4096 => "tiny",
-                    4097..=65536 => "small", 
-                    65537..=1048576 => "medium",
-                    1048577..=104857600 => "large",
-                    _ => "huge"
-                };
-                debug!("Processing {} file: {} ({} bytes)", size_category, path.display(), file_size);
-
-                if args_clone.max_file_size > 0 && file_size > args_clone.max_file_size {
-                    debug!("Skipping large file: {} (size: {} > max: {})", path.display(), file_size, args_clone.max_file_size);
-                    processed_files.fetch_add(1, Ordering::SeqCst);
-                    warming_bar.inc(1);
-                    return;
-                }
-
-                let warming_start = Instant::now();
-                let warming_method = if cfg!(target_os = "linux") {
-                    "linux_fadvise"
-                } else if cfg!(target_os = "macos") {
-                    "macos_madvise"
-                } else {
-                    "fallback_read"
-                };
-                
-                let warmed = if cfg!(target_os = "linux") {
-                    #[cfg(target_os = "linux")]
-                    { warm_with_fadvise(&file, file_size) }
-                    #[cfg(not(target_os = "linux"))]
-                    { false }
-                } else if cfg!(target_os = "macos") {
-                    #[cfg(target_os = "macos")]
-                    { warm_with_madvise(&file, file_size) }
-                    #[cfg(not(target_os = "macos"))]
-                    { false }
-                } else {
-                    false
-                };
-
-                let fallback_method = if !warmed {
-                    let fallback_start = Instant::now();
-                    if args_clone.sparse_large_files > 0 && file_size > args_clone.sparse_large_files {
-                        debug!("Using sparse reading for large file: {} ({} bytes)", path.display(), file_size);
-                        let page_size: u64 = 4096;
-                        let mut offset: u64 = 0;
-                        let mut pages_read = 0;
-
-                        while offset < file_size {
-                            if let Err(e) = file.seek(std::io::SeekFrom::Start(offset)).await {
-                                debug!("Failed to seek in file {} at offset {}: {}", path.display(), offset, e);
-                                break;
-                            }
-                            let mut byte = [0; 1];
-                            match file.read(&mut byte).await {
-                                Ok(n) => {
-                                    if n == 0 {
-                                        break;
-                                    }
-                                    pages_read += 1;
-                                }
-                                Err(e) => {
-                                    debug!("Failed to read byte in file {} at offset {}: {}", path.display(), offset, e);
-                                    break;
-                                }
-                            }
-                            offset += page_size;
-                        }
-                        debug!("Sparse read completed: {} pages sampled in {:?}", pages_read, fallback_start.elapsed());
-                        "sparse_read"
-                    } else {
-                        debug!("Using full buffer read for file: {} ({} bytes)", path.display(), file_size);
-                        let mut reader = BufReader::new(file);
-                        let mut buffer = [0; 8192];
-                        let mut total_read = 0;
-
-                        loop {
-                            match reader.read(&mut buffer).await {
-                                Ok(0) => break,
-                                Ok(n) => { total_read += n; },
-                                Err(e) => {
-                                    debug!("Failed to read file {}: {}", path.display(), e);
-                                    break;
-                                }
+                    // Use the modular warming interface
+                    let _warming_start = Instant::now();
+                    match warm_file(&path, file_size, &warming_options).await {
+                        Ok(result) => {
+                            debug!("File {} warming completed: method={}, success={}, duration={:?}, size={}", 
+                                   path.display(), result.method, result.success, result.duration, file_size);
+                            
+                            // Log performance warnings for slow operations
+                            if result.duration > Duration::from_millis(100) {
+                                warn!("Slow warming operation: {} took {:?} for {} bytes", 
+                                      path.display(), result.duration, file_size);
                             }
                         }
-                        debug!("Full read completed: {} bytes in {:?}", total_read, fallback_start.elapsed());
-                        "full_read"
+                        Err(e) => {
+                            debug!("Failed to warm file {}: {}", path.display(), e);
+                        }
                     }
-                } else {
-                    warming_method
-                };
-
-                let warming_duration = warming_start.elapsed();
-                debug!("File {} warming completed: method={}, duration={:?}, size={}", 
-                       path.display(), fallback_method, warming_duration, file_size);
-
-                // Log performance warnings for slow operations
-                if warming_duration > Duration::from_millis(100) {
-                    warn!("Slow warming operation: {} took {:?} for {} bytes", 
-                          path.display(), warming_duration, file_size);
-                }
 
                     total_bytes_warmed.fetch_add(file_size, Ordering::SeqCst);
                     processed_files.fetch_add(1, Ordering::SeqCst);
