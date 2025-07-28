@@ -141,6 +141,34 @@ async fn main() -> Result<()> {
         sparse_large_files: args.sparse_large_files,
     };
     
+    // Display strategy selection at startup
+    if warming_options.use_io_uring || warming_options.use_libaio {
+        println!("🔧 Cache Warming Strategy:");
+        if warming_options.use_io_uring {
+            #[cfg(target_os = "linux")]
+            println!("   📡 io_uring requested - will attempt for maximum performance");
+            #[cfg(not(target_os = "linux"))]
+            println!("   ⚠️  io_uring requested but not available on this platform");
+        }
+        if warming_options.use_libaio {
+            #[cfg(target_os = "linux")]
+            println!("   🚀 libaio requested - will attempt for high performance");
+            #[cfg(not(target_os = "linux"))]
+            println!("   ⚠️  libaio requested but not available on this platform");
+        }
+        if warming_options.use_direct_io {
+            println!("   💾 Direct I/O enabled - bypassing OS page cache");
+        }
+        println!("   🔄 Will fall back to OS hints and Tokio async I/O if needed");
+        println!();
+    } else {
+        println!("🔧 Cache Warming Strategy: Using OS hints and Tokio async I/O");
+        if warming_options.use_direct_io {
+            println!("   💾 Direct I/O enabled");
+        }
+        println!();
+    }
+    
     // Use a channel-based approach for batch file processing
     let (tx, rx) = mpsc::unbounded_channel::<Vec<PathBuf>>();
     

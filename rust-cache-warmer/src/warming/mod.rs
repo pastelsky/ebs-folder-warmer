@@ -4,10 +4,10 @@ use log::debug;
 pub mod fallback;
 pub mod tokio_async;
 
-#[cfg(all(target_os = "linux", feature = "libaio"))]
+#[cfg(target_os = "linux")]
 pub mod libaio;
 
-#[cfg(all(target_os = "linux", feature = "io_uring"))]
+#[cfg(target_os = "linux")]
 pub mod io_uring;
 
 /// Warming strategy options
@@ -41,16 +41,32 @@ pub async fn warm_file(
     // 3. OS hints (fadvise/madvise)
     // 4. Tokio fallback
     
-    #[cfg(all(target_os = "linux", feature = "io_uring"))]
+    #[cfg(target_os = "linux")]
     if options.use_io_uring {
-        debug!("Using io_uring strategy for {}", path.display());
-        return io_uring::warm_file(path, file_size, options).await;
+        debug!("Attempting io_uring strategy for {}", path.display());
+        match io_uring::warm_file(path, file_size, options).await {
+            Ok(result) => {
+                return Ok(result);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Unsupported => {
+                debug!("io_uring not available: {}", e);
+            }
+            Err(e) => return Err(e),
+        }
     }
     
-    #[cfg(all(target_os = "linux", feature = "libaio"))]
+    #[cfg(target_os = "linux")]
     if options.use_libaio {
-        debug!("Using libaio strategy for {}", path.display());
-        return libaio::warm_file(path, file_size, options).await;
+        debug!("Attempting libaio strategy for {}", path.display());
+        match libaio::warm_file(path, file_size, options).await {
+            Ok(result) => {
+                return Ok(result);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Unsupported => {
+                debug!("libaio not available: {}", e);
+            }
+            Err(e) => return Err(e),
+        }
     }
     
     // Try OS hints first (most efficient)

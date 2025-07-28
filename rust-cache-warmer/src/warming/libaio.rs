@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 use log::debug;
 
-#[cfg(all(target_os = "linux", feature = "libaio"))]
+#[cfg(target_os = "linux")]
 use rio::{Rio, Completion};
 #[cfg(target_os = "linux")]
 use libc;
@@ -10,7 +10,7 @@ use libc;
 use crate::warming::{WarmingResult, WarmingOptions};
 
 /// Warm file using Linux AIO (libaio) with optional direct I/O
-#[cfg(all(target_os = "linux", feature = "libaio"))]
+#[cfg(target_os = "linux")]
 pub async fn warm_file(
     path: &PathBuf,
     file_size: u64,
@@ -31,198 +31,166 @@ pub async fn warm_file(
     }
 }
 
-#[cfg(all(target_os = "linux", feature = "libaio"))]
-async fn warm_with_libaio_direct(path: &PathBuf, file_size: u64, sparse_threshold: u64) -> Result<WarmingResult, std::io::Error> {
+#[cfg(target_os = "linux")]
+async fn warm_with_libaio_direct(
+    path: &PathBuf,
+    file_size: u64,
+    sparse_large_files: u64,
+) -> Result<WarmingResult, std::io::Error> {
     let start = Instant::now();
-    const ALIGNMENT: usize = 4096;
-    const CHUNK_SIZE: usize = 1024 * 1024; // 1MB chunks
-    const MAX_QUEUE_DEPTH: usize = 256; // High queue depth for better performance
     
-    // Open file with O_DIRECT
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_DIRECT)
-        .open(path)?;
-    
-    // Create Rio instance for async I/O
-    let rio = Rio::new().map_err(|e| {
-        debug!("Failed to create Rio instance: {}", e);
-        std::io::Error::new(std::io::ErrorKind::Other, format!("Rio creation failed: {}", e))
-    })?;
-    
-    if sparse_threshold > 0 && file_size > sparse_threshold {
-        // Sparse reading with libaio for large files
-        debug!("Using sparse libaio + direct I/O for large file ({} bytes)", file_size);
-        let sample_interval: u64 = 65536; // 64KB intervals
-        let mut samples_read = 0;
-        
-        // Calculate number of samples
-        let num_samples = ((file_size + sample_interval - 1) / sample_interval) as usize;
-        let batch_size = std::cmp::min(MAX_QUEUE_DEPTH, num_samples);
-        
-        // Allocate aligned buffers for direct I/O
-        let mut buffers = Vec::new();
-        let layout = std::alloc::Layout::from_size_align(ALIGNMENT, ALIGNMENT)
-            .map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, "Failed to create aligned memory layout"))?;
-        
-        for _ in 0..batch_size {
-            let buffer = unsafe { std::alloc::alloc(layout) };
-            if buffer.is_null() {
-                // Clean up allocated buffers
-                for buf in buffers {
-                    unsafe { std::alloc::dealloc(buf, layout) };
-                }
-                return Err(std::io::Error::new(std::io::ErrorKind::OutOfMemory, "Failed to allocate aligned buffer"));
+    // Check if libaio (rio) is available by trying to create a Rio instance
+    match Rio::new() {
+        Ok(rio) => {
+            // Use sparse reading for large files
+            if sparse_large_files > 0 && file_size > sparse_large_files {
+                warm_sparse_libaio_direct(&rio, path, file_size).await
+            } else {
+                warm_full_libaio_direct(&rio, path).await
             }
-            buffers.push(buffer);
         }
-        
-        let result = async {
-            let mut offset: u64 = 0;
-            let mut batch_count = 0;
-            
-            while offset < file_size {
-                let mut operations = Vec::new();
-                
-                // Submit a batch of reads
-                for i in 0..batch_size {
-                    if offset >= file_size { break; }
-                    
-                    let aligned_offset = (offset / ALIGNMENT as u64) * ALIGNMENT as u64;
-                    let buffer_idx = i % buffers.len();
-                    let buffer_slice = unsafe { 
-                        std::slice::from_raw_parts_mut(buffers[buffer_idx], ALIGNMENT) 
-                    };
-                    
-                    let completion = rio.read_at(&file, buffer_slice, aligned_offset);
-                    operations.push(completion);
-                    
-                    offset += sample_interval;
-                }
-                
-                // Wait for completions
-                for completion in operations {
-                    match completion.wait() {
-                        Ok(bytes_read) => {
-                            if bytes_read > 0 {
-                                samples_read += 1;
-                            }
-                        }
-                        Err(e) => {
-                            debug!("libaio read failed: {}", e);
-                        }
-                    }
-                }
-                
-                batch_count += 1;
-            }
-            Ok(())
-        }.await;
-        
-        // Clean up buffers
-        for buffer in buffers {
-            unsafe { std::alloc::dealloc(buffer, layout) };
-        }
-        
-        debug!("Sparse libaio + direct I/O completed: {} samples in {:?}", samples_read, start.elapsed());
-        
-        match result {
-            Ok(()) => Ok(WarmingResult {
-                method: "libaio_direct_sparse",
-                success: true,
-                duration: start.elapsed(),
-            }),
-            Err(e) => Err(e),
-        }
-    } else {
-        // Full libaio + direct I/O reading for smaller files
-        debug!("Using full libaio + direct I/O for file ({} bytes)", file_size);
-        
-        let num_chunks = ((file_size + CHUNK_SIZE as u64 - 1) / CHUNK_SIZE as u64) as usize;
-        let batch_size = std::cmp::min(MAX_QUEUE_DEPTH, num_chunks);
-        
-        // Allocate aligned buffers
-        let mut buffers = Vec::new();
-        let layout = std::alloc::Layout::from_size_align(CHUNK_SIZE, ALIGNMENT)
-            .map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, "Failed to create aligned memory layout"))?;
-        
-        for _ in 0..batch_size {
-            let buffer = unsafe { std::alloc::alloc(layout) };
-            if buffer.is_null() {
-                for buf in buffers {
-                    unsafe { std::alloc::dealloc(buf, layout) };
-                }
-                return Err(std::io::Error::new(std::io::ErrorKind::OutOfMemory, "Failed to allocate aligned buffer"));
-            }
-            buffers.push(buffer);
-        }
-        
-        let result = async {
-            let mut total_read = 0u64;
-            let mut offset = 0u64;
-            let mut batch_count = 0;
-            
-            while offset < file_size {
-                let mut operations = Vec::new();
-                
-                // Submit a batch of reads
-                for i in 0..batch_size {
-                    if offset >= file_size { break; }
-                    
-                    let remaining = file_size - offset;
-                    let read_size = std::cmp::min(CHUNK_SIZE as u64, remaining);
-                    let aligned_read_size = ((read_size + ALIGNMENT as u64 - 1) / ALIGNMENT as u64) * ALIGNMENT as u64;
-                    let actual_read_size = std::cmp::min(aligned_read_size, CHUNK_SIZE as u64) as usize;
-                    
-                    let buffer_idx = i % buffers.len();
-                    let buffer_slice = unsafe { 
-                        std::slice::from_raw_parts_mut(buffers[buffer_idx], actual_read_size) 
-                    };
-                    
-                    let completion = rio.read_at(&file, buffer_slice, offset);
-                    operations.push((completion, offset, actual_read_size));
-                    
-                    offset += actual_read_size as u64;
-                }
-                
-                // Wait for completions
-                for (completion, _read_offset, _size) in operations {
-                    match completion.wait() {
-                        Ok(bytes_read) => {
-                            total_read += bytes_read as u64;
-                        }
-                        Err(e) => {
-                            debug!("libaio read failed: {}", e);
-                        }
-                    }
-                }
-                
-                batch_count += 1;
-            }
-            Ok(total_read)
-        }.await;
-        
-        // Clean up buffers
-        for buffer in buffers {
-            unsafe { std::alloc::dealloc(buffer, layout) };
-        }
-        
-        match result {
-            Ok(bytes_read) => {
-                debug!("Full libaio + direct I/O completed: {} bytes read in {:?}", bytes_read, start.elapsed());
-                Ok(WarmingResult {
-                    method: "libaio_direct_full",
-                    success: true,
-                    duration: start.elapsed(),
-                })
-            }
-            Err(e) => Err(e),
+        Err(_) => {
+            // libaio not available
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "libaio not available on this system"
+            ))
         }
     }
 }
 
-// Stub implementation for when libaio feature is not enabled
-#[cfg(not(all(target_os = "linux", feature = "libaio")))]
+#[cfg(target_os = "linux")]
+async fn warm_sparse_libaio_direct(
+    rio: &Rio,
+    path: &PathBuf,
+    file_size: u64,
+) -> Result<WarmingResult, std::io::Error> {
+    let start = Instant::now();
+    
+    // Open file with O_DIRECT
+    let fd = unsafe {
+        libc::open(
+            std::ffi::CString::new(path.to_string_lossy().as_ref()).unwrap().as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECT,
+            0,
+        )
+    };
+    
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    
+    let block_size = 4096u64; // Standard block size
+    let stride = 65536u64; // Read every 64KB
+    let mut bytes_read = 0u64;
+    
+    // Allocate aligned buffer for direct I/O
+    let layout = std::alloc::Layout::from_size_align(block_size as usize, block_size as usize)
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, "Failed to create aligned memory layout"))?;
+    let buffer = unsafe { std::alloc::alloc(layout) };
+    if buffer.is_null() {
+        unsafe { libc::close(fd) };
+        return Err(std::io::Error::new(std::io::ErrorKind::OutOfMemory, "Failed to allocate aligned buffer"));
+    }
+    
+    let mut offset = 0;
+    while offset < file_size {
+        let buffer_slice = unsafe { std::slice::from_raw_parts_mut(buffer, block_size as usize) };
+        
+        match rio.read_at(&fd, buffer_slice, offset).await {
+            Ok(n) if n > 0 => {
+                bytes_read += n as u64;
+            }
+            Ok(_) => break, // EOF
+            Err(e) => {
+                debug!("libaio read error at offset {}: {}", offset, e);
+                // Continue with next block on error
+            }
+        }
+        
+        offset += stride;
+    }
+    
+    unsafe { 
+        std::alloc::dealloc(buffer, layout);
+        libc::close(fd);
+    }
+    
+    debug!("Sparse libaio + direct I/O completed: {} bytes read in {:?}", bytes_read, start.elapsed());
+    Ok(WarmingResult {
+        method: "libaio_direct_sparse",
+        success: true,
+        duration: start.elapsed(),
+    })
+}
+
+#[cfg(target_os = "linux")]
+async fn warm_full_libaio_direct(
+    rio: &Rio,
+    path: &PathBuf,
+) -> Result<WarmingResult, std::io::Error> {
+    let start = Instant::now();
+    
+    // Open file with O_DIRECT
+    let fd = unsafe {
+        libc::open(
+            std::ffi::CString::new(path.to_string_lossy().as_ref()).unwrap().as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECT,
+            0,
+        )
+    };
+    
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    
+    let block_size = 65536; // 64KB blocks for efficient reading
+    let mut total_bytes_read = 0u64;
+    let mut offset = 0;
+    
+    // Allocate aligned buffer for direct I/O
+    let layout = std::alloc::Layout::from_size_align(block_size, block_size)
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, "Failed to create aligned memory layout"))?;
+    let buffer = unsafe { std::alloc::alloc(layout) };
+    if buffer.is_null() {
+        unsafe { libc::close(fd) };
+        return Err(std::io::Error::new(std::io::ErrorKind::OutOfMemory, "Failed to allocate aligned buffer"));
+    }
+    
+    loop {
+        let buffer_slice = unsafe { std::slice::from_raw_parts_mut(buffer, block_size) };
+        
+        match rio.read_at(&fd, buffer_slice, offset as u64).await {
+            Ok(n) if n > 0 => {
+                total_bytes_read += n as u64;
+                offset += n;
+            }
+            Ok(_) => break, // EOF
+            Err(e) => {
+                unsafe { 
+                    std::alloc::dealloc(buffer, layout);
+                    libc::close(fd);
+                }
+                return Err(e);
+            }
+        }
+    }
+    
+    unsafe { 
+        std::alloc::dealloc(buffer, layout);
+        libc::close(fd);
+    }
+    
+    debug!("Full libaio + direct I/O completed: {} bytes read in {:?}", total_bytes_read, start.elapsed());
+    Ok(WarmingResult {
+        method: "libaio_direct_full",
+        success: true,
+        duration: start.elapsed(),
+    })
+}
+
+// Stub implementation for non-Linux systems
+#[cfg(not(target_os = "linux"))]
 pub async fn warm_file(
     _path: &PathBuf,
     _file_size: u64,
@@ -230,6 +198,6 @@ pub async fn warm_file(
 ) -> Result<WarmingResult, std::io::Error> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
-        "libaio feature not enabled"
+        "libaio only supported on Linux"
     ))
 } 

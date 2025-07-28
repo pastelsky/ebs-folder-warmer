@@ -1,12 +1,11 @@
 # Rust Cache Warmer
 
-High-performance, concurrent file cache warmer for EBS volumes. Designed to efficiently warm Amazon EBS volumes from S3 snapshots without polluting OS page cache.
+High-performance, concurrent file cache warmer for EBS volumes. Designed to efficiently warm Amazon EBS volumes from S3 snapshots.
 
 ## Features
 
 - **Multiple I/O Strategies**: io_uring, libaio, OS hints (fadvise/madvise), Tokio async
 - **Direct I/O Support**: Bypass OS page cache for pure EBS warming 
-- **Automatic Cache Dropping**: Immediately drops warmed data from memory
 - **Sparse Reading**: Efficient sampling for large files
 - **High Concurrency**: Configurable queue depths (32-512+ operations)
 - **Cross-Platform**: Linux (io_uring/libaio), macOS (madvise), universal fallbacks
@@ -64,11 +63,9 @@ Options:
       --profile                       Generate flamegraph.svg profiling
 ```
 
-## EBS Warming Strategy
+## Warming Strategy
 
 1. **Triggers EBS fetch**: Any read operation causes EBS to fetch blocks from S3
 2. **Avoids memory waste**: Direct I/O or immediate cache dropping prevents OS caching
 3. **Efficient sampling**: Sparse reading for large files (64KB intervals)  
 4. **High throughput**: Concurrent operations with appropriate queue depths
-
-Perfect for warming EBS volumes without consuming instance memory. 
